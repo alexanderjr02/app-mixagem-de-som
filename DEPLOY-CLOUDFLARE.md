@@ -115,9 +115,14 @@ Todo push no `main` publica de novo sozinho.
 
 ### Pela linha de comando
 
+O projeto já vem com o `wrangler.jsonc` apontando para a pasta `public`:
+
 ```bash
-npx wrangler pages deploy public --project-name monitor-01v96
+npx wrangler pages deploy
 ```
+
+Já está no ar em **https://monitor-01v96.pages.dev** (interface em modo
+demonstração).
 
 ### Ligar essa página no seu Pi
 

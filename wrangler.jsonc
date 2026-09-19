@@ -1,0 +1,8 @@
+{
+  // Usado apenas para publicar a INTERFACE no Cloudflare Pages
+  // (npx wrangler pages deploy). O bridge nao roda aqui: ele precisa da porta
+  // USB-MIDI do Raspberry Pi. Veja DEPLOY-CLOUDFLARE.md.
+  "name": "monitor-01v96",
+  "compatibility_date": "2026-09-18",
+  "pages_build_output_dir": "public"
+}

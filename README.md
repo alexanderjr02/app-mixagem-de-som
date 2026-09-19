@@ -50,6 +50,20 @@ O fader mexe só na tela. É a trava de segurança para nada chegar torto na mes
 
 ---
 
+### Precisa ser Raspberry Pi?
+
+Não. Quem conversa com a mesa é a máquina ligada nela por **USB**, e o celular
+chega nessa máquina pela rede. Pode ser um notebook em cima do rack.
+
+O Pi é a melhor escolha para deixar fixo: é pequeno, barato, liga sozinho com o
+sistema e não precisa de ninguém abrindo programa. Num notebook Windows o
+pacote MIDI é nativo e só compila se você tiver o Visual Studio Build Tools
+instalado (`npm install --global windows-build-tools` ou o instalador da
+Microsoft). No Linux e no macOS é mais simples.
+
+E vale o lembrete: celular e máquina precisam estar na **mesma rede Wi-Fi**
+(a menos que você monte o túnel do `DEPLOY-CLOUDFLARE.md`).
+
 ## 1. Instalação no Raspberry Pi
 
 Vale qualquer Pi com rede (Zero 2 W, 3, 4, 5).
@@ -328,6 +342,7 @@ direto no navegador.
 | "conectado" não aparece no celular | Celular em outra rede Wi-Fi, ou firewall do Pi. Teste o IP direto em vez de `monitor.local` |
 | O fader treme sozinho | Desligue o **ECHO** de Parameter Change na mesa, ou aumente `janelaEcoMs` |
 | `npm install` falha no `midi` | Falta `build-essential` e `libasound2-dev`. Sem ele o app roda em modo simulado |
+| `npm install` avisa `allow-scripts` e o `midi` não compila | npm novo pede autorização para compilar pacote nativo. Rode `npm approve-scripts midi` e instale de novo |
 | Mudei o app e o celular mostra o antigo | Puxe a tela para atualizar, ou feche e abra o app instalado (o service worker guarda uma cópia) |
 
 ## Segurança
