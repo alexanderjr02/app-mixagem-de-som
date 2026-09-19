@@ -10,6 +10,7 @@ const PASSO_TECLADO = 0.02;
 const PASSO_TECLADO_GRANDE = 0.1;
 const INTERVALO_ENVIO = 40;   // ms entre lotes de mensagens para o bridge
 const BACKOFF_MAX = 5000;     // teto do tempo de espera entre reconexoes
+const ESPERA_DEMO = 30000;    // em demonstracao, so espia de vez em quando
 
 // Lista usada quando nao existe bridge nenhum (ex: app aberto numa hospedagem
 // so para conhecer a interface). Nesse modo nada sai para a mesa.
@@ -20,7 +21,7 @@ const CONTROLES_DEMO = [
   { id: 'tons', label: 'Tons', type: 'canal', calibrated: false },
   { id: 'baixo', label: 'Baixo', type: 'canal', calibrated: false },
   { id: 'guitarra', label: 'Guitarra', type: 'canal', calibrated: false },
-  { id: 'violao', label: 'Violao', type: 'canal', calibrated: false },
+  { id: 'violao', label: 'Violão', type: 'canal', calibrated: false },
   { id: 'teclado', label: 'Teclado', type: 'canal', calibrated: false },
   { id: 'voz1', label: 'Voz 1', type: 'canal', calibrated: false },
   { id: 'voz2', label: 'Voz 2', type: 'canal', calibrated: false },
@@ -45,6 +46,7 @@ let socket = null;
 let tentativas = 0;
 let timerReconexao = null;
 let modoDemo = false;
+let checagemFeita = false;
 let statusMidi = null;
 
 /* ------------------------------- utilidades ------------------------------ */
@@ -67,7 +69,7 @@ function urlDoBridge() {
 
 function atualizarRodape() {
   if (modoDemo) {
-    elRodape.textContent = 'modo demonstracao: os faders mexem so na tela, nada chega na mesa';
+    elRodape.textContent = 'modo demonstração: os faders mexem só na tela, nada chega na mesa';
     return;
   }
   if (!statusMidi) {
@@ -264,7 +266,9 @@ function conectar() {
     return;
   }
 
-  definirConexao(tentativas === 0 ? 'ligando' : 'offline', tentativas === 0 ? 'ligando' : 'reconectando');
+  if (!modoDemo) {
+    definirConexao(tentativas === 0 ? 'ligando' : 'offline', tentativas === 0 ? 'ligando' : 'reconectando');
+  }
 
   let alvo;
   try {
@@ -278,6 +282,7 @@ function conectar() {
   socket.addEventListener('open', () => {
     tentativas = 0;
     modoDemo = false;
+    checagemFeita = false;
     definirConexao('online', 'conectado');
     manterTelaAcesa();
   });
@@ -313,26 +318,50 @@ function conectar() {
 
 function agendarReconexao() {
   tentativas++;
-
-  // Se nem o bridge nem a API respondem, provavelmente a pagina esta sendo
-  // servida de outro lugar. Entra em demonstracao para a interface continuar
-  // navegavel, deixando claro que nada sai para a mesa.
-  if (tentativas === 3 && faders.size === 0) {
-    entrarEmDemo();
-  }
+  verificarSeExisteBridge();
 
   if (timerReconexao) return;
-  const espera = Math.min(BACKOFF_MAX, 500 * Math.pow(2, Math.min(tentativas, 4)));
+
+  // Em demonstracao nao existe bridge para voltar: basta espiar de vez em
+  // quando, em vez de ficar tentando a cada poucos segundos e gastar bateria.
+  const espera = modoDemo
+    ? ESPERA_DEMO
+    : Math.min(BACKOFF_MAX, 500 * Math.pow(2, Math.min(tentativas, 4)));
   timerReconexao = setTimeout(() => {
     timerReconexao = null;
     conectar();
   }, espera);
 }
 
+/**
+ * O WebSocket falhou. Antes de desistir, pergunta pelo HTTP se existe um bridge
+ * ali. Se existir, o problema e passageiro e continuamos tentando. Se nao
+ * existir (pagina servida por uma hospedagem qualquer, sem o Raspberry Pi),
+ * entra em demonstracao para a interface continuar navegavel.
+ */
+async function verificarSeExisteBridge() {
+  if (checagemFeita || modoDemo || faders.size > 0) return;
+  checagemFeita = true;
+
+  try {
+    const base = urlDoBridge().replace(/^ws/, 'http').replace(/\/+$/, '');
+    const resposta = await fetch(base + '/api/controls', { cache: 'no-store' });
+    const dados = await resposta.json();
+    if (resposta.ok && Array.isArray(dados.controls)) {
+      checagemFeita = false; // existe bridge: vale a pena continuar tentando
+      return;
+    }
+  } catch {
+    // sem resposta, ou resposta que nao e do bridge: cai na demonstracao
+  }
+
+  entrarEmDemo();
+}
+
 function entrarEmDemo() {
   modoDemo = true;
   statusMidi = null;
-  definirConexao('demo', 'demonstracao');
+  definirConexao('demo', 'demonstração');
   desenharControles(CONTROLES_DEMO);
   aplicarEstado(
     {
@@ -350,7 +379,7 @@ elConexao.addEventListener('click', () => {
   const salvo = localStorage.getItem(CHAVE_BRIDGE) || '';
   elPainelEndereco.value = salvo;
   elPainelInfo.textContent =
-    'Situacao: ' + elConexaoTexto.textContent + '\nEndereco em uso: ' + urlDoBridge();
+    'Situação: ' + elConexaoTexto.textContent + '\nEndereço em uso: ' + urlDoBridge();
   elPainel.showModal();
 });
 
@@ -361,9 +390,11 @@ elPainel.addEventListener('close', () => {
   if (valor) localStorage.setItem(CHAVE_BRIDGE, valor);
   else localStorage.removeItem(CHAVE_BRIDGE);
 
-  // Reconecta ja com o endereco novo.
+  // Reconecta ja com o endereco novo, do zero.
   tentativas = 0;
   modoDemo = false;
+  checagemFeita = false;
+  faders.clear();
   if (socket) {
     try { socket.close(); } catch { /* ignora */ }
   }

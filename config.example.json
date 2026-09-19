@@ -22,7 +22,7 @@
     { "id": "tons",     "rotulo": "Tons",     "tipo": "canal",  "valorInicial": 0.45, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
     { "id": "baixo",    "rotulo": "Baixo",    "tipo": "canal",  "valorInicial": 0.65, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
     { "id": "guitarra", "rotulo": "Guitarra", "tipo": "canal",  "valorInicial": 0.45, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
-    { "id": "violao",   "rotulo": "Violao",   "tipo": "canal",  "valorInicial": 0.45, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
+    { "id": "violao",   "rotulo": "Violão",   "tipo": "canal",  "valorInicial": 0.45, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
     { "id": "teclado",  "rotulo": "Teclado",  "tipo": "canal",  "valorInicial": 0.50, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
     { "id": "voz1",     "rotulo": "Voz 1",    "tipo": "canal",  "valorInicial": 0.70, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },
     { "id": "voz2",     "rotulo": "Voz 2",    "tipo": "canal",  "valorInicial": 0.60, "calibrado": false, "template": null, "valueOffset": null, "valueLength": null, "rawMin": null, "rawMax": null },

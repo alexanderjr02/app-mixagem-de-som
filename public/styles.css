@@ -308,13 +308,15 @@ body[data-conexao="offline"] .palco {
   text-overflow: ellipsis;
 }
 
-.fader--mestre .fader__rotulo,
-.fader--mestre .fader__valor { color: var(--texto); }
+/* A classe vem do "tipo" do controle (canal, reverb, master), do jeito que o
+   bridge manda no protocolo. */
+.fader--master .fader__rotulo,
+.fader--master .fader__valor { color: var(--texto); }
 
 /* "Volume geral" e comprido: um pouco menor para nao cortar. */
-.fader--mestre .fader__rotulo {
+.fader--master .fader__rotulo {
   font-size: 10px;
-  letter-spacing: 0.03em;
+  letter-spacing: 0;
 }
 
 /* Canal mudo: o fader continua na posicao, mas fica claro que nao sai som. */
@@ -322,7 +324,7 @@ body[data-conexao="offline"] .palco {
 .fader[data-mudo="1"] .fader__punho { background: var(--texto-3); }
 .fader[data-mudo="1"] .fader__valor { color: var(--texto-3); }
 
-.fader--mestre .fader__trilho { border-color: var(--linha-forte); }
+.fader--master .fader__trilho { border-color: var(--linha-forte); }
 
 .fader--reverb .fader__trilho { border-style: dashed; }
 
