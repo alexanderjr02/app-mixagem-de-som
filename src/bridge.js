@@ -33,6 +33,22 @@ const mesa = require('./yamaha01v96');
 
 const DIR_PUBLIC = path.join(configArquivo.RAIZ, 'public');
 
+/**
+ * Ultimos avisos, guardados para o botao "copiar diagnostico" do app.
+ * Quando algo dá errado no meio do culto, ninguem vai abrir terminal: da para
+ * copiar isso pelo celular e mandar para quem for ajudar.
+ */
+const avisos = [];
+for (const nivel of ['warn', 'error']) {
+  const original = console[nivel].bind(console);
+  console[nivel] = (...args) => {
+    const hora = new Date().toTimeString().slice(0, 8);
+    avisos.push(hora + ' ' + args.join(' '));
+    if (avisos.length > 30) avisos.shift();
+    original(...args);
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Configuracao e estado
 // ---------------------------------------------------------------------------
@@ -472,15 +488,25 @@ const servidor = http.createServer((req, res) => {
     return;
   }
   if (caminhoUrl === '/api/status') {
+    const portas = listarPortas();
     responderJson(res, {
       midi: {
         saida: saidaMidi.nome,
         entrada: entradaMidi.nome,
         simulado: saidaMidi.simulado,
-        entradaSimulada: entradaMidi.simulado
+        entradaSimulada: entradaMidi.simulado,
+        motivo: saidaMidi.motivo || null,
+        portasVistas: portas.saidas
       },
+      maquina: {
+        sistema: process.platform,
+        node: process.version,
+        ligadoHa: Math.round(process.uptime()) + 's'
+      },
+      controles: controles.length,
+      naoCalibrados,
       clientes: wss ? wss.clients.size : 0,
-      naoCalibrados
+      avisos
     });
     return;
   }

@@ -57,6 +57,11 @@ function urlDoBridge() {
   return protocolo + '//' + location.host;
 }
 
+/** O mesmo endereco do bridge, mas em http, para as consultas soltas. */
+function urlHttpDoBridge() {
+  return urlDoBridge().replace(/^ws/, 'http').replace(/\/+$/, '');
+}
+
 function atualizarRodape() {
   if (!conectado) {
     elRodape.textContent = 'sem conexão com o bridge: ' + urlDoBridge();
@@ -477,6 +482,61 @@ elBtnAjustes.addEventListener('click', () => {
   desenharEstadoDaMesa();
   enviar({ type: 'midi:portas' });
   elAjustes.showModal();
+});
+
+/* ---- diagnostico para colar numa conversa ----------------------------- */
+
+const elBtnDiagnostico = document.getElementById('btnDiagnostico');
+
+elBtnDiagnostico.addEventListener('click', async () => {
+  const original = elBtnDiagnostico.textContent;
+  elBtnDiagnostico.disabled = true;
+  elBtnDiagnostico.textContent = 'montando';
+
+  let texto;
+  try {
+    const dados = await fetch(urlHttpDoBridge() + '/api/status', { cache: 'no-store' }).then((r) => r.json());
+    const linhas = [
+      'Monitor 01V96, diagnóstico de ' + new Date().toLocaleString('pt-BR'),
+      'endereço: ' + urlDoBridge(),
+      'máquina: ' + dados.maquina.sistema + ', node ' + dados.maquina.node + ', ligado há ' + dados.maquina.ligadoHa,
+      'mesa: ' + (dados.midi.simulado ? 'NAO ENCONTRADA' : dados.midi.saida),
+      'motivo: ' + (dados.midi.motivo || 'sem erro'),
+      'portas MIDI vistas: ' + ((dados.midi.portasVistas || []).join(' | ') || 'nenhuma'),
+      'controles: ' + dados.controles + ', sem calibrar: ' + (dados.naoCalibrados.join(', ') || 'nenhum'),
+      'celulares conectados: ' + dados.clientes,
+      'celular: ' + navigator.userAgent,
+      '',
+      'últimos avisos do programa:',
+      ...(dados.avisos && dados.avisos.length ? dados.avisos : ['nenhum'])
+    ];
+    texto = linhas.join('\n');
+  } catch (erro) {
+    texto = 'Monitor 01V96: não consegui falar com o bridge em ' + urlDoBridge() + '\n' + erro.message;
+  }
+
+  let copiou = false;
+  try {
+    await navigator.clipboard.writeText(texto);
+    copiou = true;
+  } catch { /* alguns navegadores só deixam copiar com o campo na tela */ }
+
+  if (!copiou) {
+    // Plano B: mostra o texto selecionado para copiar na mão.
+    const campo = document.createElement('textarea');
+    campo.value = texto;
+    campo.style.cssText = 'position:fixed;inset:auto 10px 10px 10px;height:40dvh;z-index:99;font-size:12px';
+    document.body.appendChild(campo);
+    campo.select();
+    try { copiou = document.execCommand('copy'); } catch { /* ignora */ }
+    setTimeout(() => campo.remove(), copiou ? 0 : 20000);
+  }
+
+  elBtnDiagnostico.textContent = copiou ? 'copiado' : 'selecione e copie';
+  setTimeout(() => {
+    elBtnDiagnostico.textContent = original;
+    elBtnDiagnostico.disabled = false;
+  }, 2200);
 });
 
 /** O botao de ajustes fica apagado enquanto nao ha bridge. */
