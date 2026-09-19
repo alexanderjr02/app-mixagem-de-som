@@ -17,12 +17,22 @@
 
 const { paraHex } = require('./yamaha01v96');
 
+/**
+ * O pacote preferido e o @julusian/midi: e o mesmo RtMidi de sempre, mas ja
+ * vem com o binario pronto para Windows, macOS, Linux e Raspberry Pi. Ou seja,
+ * "npm install" funciona na maquina da mesa sem precisar de compilador.
+ * O node-midi classico fica como alternativa, caso ja esteja instalado.
+ */
 let midi = null;
 let erroMidi = null;
-try {
-  midi = require('midi');
-} catch (erro) {
-  erroMidi = erro;
+for (const pacote of ['@julusian/midi', 'midi']) {
+  try {
+    midi = require(pacote);
+    erroMidi = null;
+    break;
+  } catch (erro) {
+    erroMidi = erro;
+  }
 }
 
 /** true se o pacote nativo esta disponivel nesta maquina. */

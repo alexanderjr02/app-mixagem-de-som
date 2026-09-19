@@ -12,12 +12,11 @@
     "learn": "node src/learn.js",
     "monitor": "node src/monitor.js",
     "portas": "node src/portas.js",
+    "simular": "node src/simular.js",
     "icones": "node scripts/gerar-icones.js"
   },
   "dependencies": {
+    "@julusian/midi": "^3.8.1",
     "ws": "^8.18.0"
-  },
-  "optionalDependencies": {
-    "midi": "^2.0.0"
   }
 }

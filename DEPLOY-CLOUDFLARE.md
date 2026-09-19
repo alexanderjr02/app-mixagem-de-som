@@ -10,13 +10,17 @@ O que o Cloudflare resolve bem são duas coisas diferentes:
 
 | Caminho | O que você ganha | O que não ganha |
 |---|---|---|
-| **Cloudflare Tunnel** (recomendado) | Abrir o seu monitor de verdade por um endereço HTTPS, de qualquer lugar, com login | Precisa do Pi ligado e na internet |
-| **Cloudflare Pages** | Um link público que mostra a interface funcionando (modo demonstração) | Não controla mesa nenhuma sozinho |
+| **Cloudflare Tunnel** (é o que resolve) | Abrir o seu monitor de verdade por um endereço HTTPS, de qualquer lugar, com login | Precisa da máquina do bridge ligada e na internet |
+| **Cloudflare Pages** | Uma cópia da interface num link fixo, que você aponta para o seu túnel | Sozinho não controla mesa nenhuma |
 
 Uma armadilha para evitar: se você hospedar **só** a interface no Pages e tentar
-apontar para o Pi da rede local, o navegador bloqueia. Página em `https://`
+apontar para a máquina da rede local, o navegador bloqueia. Página em `https://`
 não pode abrir WebSocket em `ws://` sem criptografia. Por isso, se a ideia é
 usar de verdade fora da rede local, o caminho é o Tunnel, não o Pages.
+
+Na rede da igreja, tocando, nada disso é necessário: você abre o endereço local
+e pronto. O Tunnel serve para ajustar de casa antes do ensaio, ou se a rede do
+lugar não deixar os aparelhos se enxergarem.
 
 ---
 
@@ -94,12 +98,12 @@ Se você quiser abrir sem digitar código toda vez, use a duração de sessão l
 
 ---
 
-## Caminho 2: Cloudflare Pages (vitrine da interface)
+## Caminho 2: Cloudflare Pages (a interface num link fixo)
 
-Útil para mostrar o app para alguém, ou para abrir a interface no celular sem
-estar perto do Pi. Sem bridge respondendo, o app entra sozinho em
-**modo demonstração**: os faders funcionam na tela, o rodapé avisa que nada sai
-para a mesa, e o indicador mostra "demonstracao".
+Só faz sentido junto com o túnel do Caminho 1: é a mesma interface, num
+endereço que não depende da sua rede, apontando para o seu bridge. Sem bridge
+respondendo, ela mostra "Sem conexão com o bridge" e não deixa mexer em nada,
+de propósito: fader que mexe sem mudar o som é pior do que fader nenhum.
 
 ### Pelo painel do Cloudflare
 
@@ -121,14 +125,12 @@ O projeto já vem com o `wrangler.jsonc` apontando para a pasta `public`:
 npx wrangler pages deploy
 ```
 
-Já está no ar em **https://monitor-01v96.pages.dev** (interface em modo
-demonstração).
+Já está no ar em **https://monitor-01v96.pages.dev**.
 
-### Ligar essa página no seu Pi
+### Ligar essa página no seu bridge
 
-Se você já montou o Tunnel do Caminho 1, a página do Pages consegue usar o
-bridge de verdade: toque no indicador de conexão no canto superior direito e
-preencha o endereço:
+Com o Tunnel do Caminho 1 montado, a página do Pages usa o bridge de verdade:
+toque no indicador de conexão no canto superior direito e preencha o endereço:
 
 ```
 wss://monitor.seudominio.com

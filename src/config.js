@@ -100,9 +100,35 @@ function salvarEstado(estado) {
   }
 }
 
+/** Transforma "Voz Principal" em "voz-principal", para virar id de controle. */
+function gerarId(rotulo) {
+  return (
+    String(rotulo || '')
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32) || 'controle'
+  );
+}
+
+/** Garante um id unico dentro da lista (bumbo, bumbo-2, bumbo-3...). */
+function idUnico(rotulo, controles, idAtual) {
+  const base = gerarId(rotulo);
+  let id = base;
+  let n = 2;
+  while (controles.some((c) => c.id === id && c.id !== idAtual)) {
+    id = base + '-' + n++;
+  }
+  return id;
+}
+
 module.exports = {
   RAIZ,
   CAMINHO_CONFIG,
+  gerarId,
+  idUnico,
   CAMINHO_ESTADO,
   carregar,
   salvar,

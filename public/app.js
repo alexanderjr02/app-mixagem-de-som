@@ -1,8 +1,10 @@
 'use strict';
 /* ---------------------------------------------------------------------------
    Monitor 01V96 - app do celular
-   Desenha os faders a partir da lista que o bridge manda, fala WebSocket e
-   reconecta sozinho quando o Wi-Fi oscila ou o celular volta do bloqueio.
+
+   Desenha os faders a partir da lista que o bridge manda, fala WebSocket,
+   reconecta sozinho quando o Wi-Fi oscila, e conduz a calibracao de cada
+   controle sem precisar de terminal na maquina da mesa.
    --------------------------------------------------------------------------- */
 
 const CHAVE_BRIDGE = 'monitor01v96.bridge';
@@ -10,44 +12,32 @@ const PASSO_TECLADO = 0.02;
 const PASSO_TECLADO_GRANDE = 0.1;
 const INTERVALO_ENVIO = 40;   // ms entre lotes de mensagens para o bridge
 const BACKOFF_MAX = 5000;     // teto do tempo de espera entre reconexoes
-const ESPERA_DEMO = 30000;    // em demonstracao, so espia de vez em quando
-
-// Lista usada quando nao existe bridge nenhum (ex: app aberto numa hospedagem
-// so para conhecer a interface). Nesse modo nada sai para a mesa.
-const CONTROLES_DEMO = [
-  { id: 'bumbo', label: 'Bumbo', type: 'canal', calibrated: false },
-  { id: 'caixa', label: 'Caixa', type: 'canal', calibrated: false },
-  { id: 'chimbal', label: 'Chimbal', type: 'canal', calibrated: false },
-  { id: 'tons', label: 'Tons', type: 'canal', calibrated: false },
-  { id: 'baixo', label: 'Baixo', type: 'canal', calibrated: false },
-  { id: 'guitarra', label: 'Guitarra', type: 'canal', calibrated: false },
-  { id: 'violao', label: 'Violão', type: 'canal', calibrated: false },
-  { id: 'teclado', label: 'Teclado', type: 'canal', calibrated: false },
-  { id: 'voz1', label: 'Voz 1', type: 'canal', calibrated: false },
-  { id: 'voz2', label: 'Voz 2', type: 'canal', calibrated: false },
-  { id: 'coral', label: 'Coral', type: 'canal', calibrated: false },
-  { id: 'clique', label: 'Clique', type: 'canal', calibrated: false },
-  { id: 'reverb', label: 'Reverb', type: 'reverb', calibrated: false },
-  { id: 'geral', label: 'Volume geral', type: 'master', calibrated: false }
-];
 
 const elCanais = document.getElementById('canais');
 const elMestre = document.getElementById('mestre');
 const elConexao = document.getElementById('conexao');
 const elConexaoTexto = document.getElementById('conexaoTexto');
 const elRodape = document.getElementById('rodape');
+const elVazio = document.getElementById('vazio');
+const elVazioTitulo = document.getElementById('vazioTitulo');
+const elVazioTexto = document.getElementById('vazioTexto');
+const elVazioAcao = document.getElementById('vazioAcao');
+const molde = document.getElementById('moldeFader');
+
+const elAjustes = document.getElementById('ajustes');
+const elListaControles = document.getElementById('listaControles');
+const elAssistente = document.getElementById('assistente');
 const elPainel = document.getElementById('painel');
 const elPainelInfo = document.getElementById('painelInfo');
 const elPainelEndereco = document.getElementById('painelEndereco');
-const molde = document.getElementById('moldeFader');
 
-const faders = new Map(); // id -> objeto do componente
+const faders = new Map(); // id -> componente do fader
+let listaControles = [];
 let socket = null;
 let tentativas = 0;
 let timerReconexao = null;
-let modoDemo = false;
-let checagemFeita = false;
 let statusMidi = null;
+let conectado = false;
 
 /* ------------------------------- utilidades ------------------------------ */
 
@@ -68,19 +58,43 @@ function urlDoBridge() {
 }
 
 function atualizarRodape() {
-  if (modoDemo) {
-    elRodape.textContent = 'modo demonstração: os faders mexem só na tela, nada chega na mesa';
+  if (!conectado) {
+    elRodape.textContent = 'sem conexão com o bridge: ' + urlDoBridge();
     return;
   }
-  if (!statusMidi) {
-    elRodape.textContent = 'conectado ao bridge';
-    return;
-  }
-  const semCalibrar = [...faders.values()].filter((f) => !f.controle.calibrated).length;
+
   const partes = [];
-  partes.push(statusMidi.simulado ? 'midi simulado (nada chega na mesa)' : 'midi: ' + statusMidi.saida);
+  if (statusMidi) {
+    partes.push(statusMidi.simulado ? 'sem mesa conectada (nada sai daqui)' : 'mesa: ' + statusMidi.saida);
+  }
+  const semCalibrar = listaControles.filter((c) => !c.calibrated).length;
   if (semCalibrar) partes.push(semCalibrar + ' sem calibrar (*)');
-  elRodape.textContent = partes.join('   |   ');
+  elRodape.textContent = partes.join('   |   ') || 'conectado';
+}
+
+/** Mostra a tela de aviso no lugar dos faders, quando faz sentido. */
+function atualizarVazio() {
+  if (!conectado) {
+    elVazio.hidden = false;
+    elVazioTitulo.textContent = 'Sem conexão com o bridge';
+    elVazioTexto.textContent =
+      'Confira se o programa está rodando na máquina ligada na mesa e se o ' +
+      'celular está na mesma rede Wi-Fi.';
+    elVazioAcao.hidden = true;
+    return;
+  }
+
+  if (!listaControles.length) {
+    elVazio.hidden = false;
+    elVazioTitulo.textContent = 'Nenhum controle ainda';
+    elVazioTexto.textContent =
+      'Cada controle é o send de um canal da mesa para o Aux do seu fone. ' +
+      'Calibre o primeiro para começar.';
+    elVazioAcao.hidden = false;
+    return;
+  }
+
+  elVazio.hidden = true;
 }
 
 /* ------------------------------ componente ------------------------------- */
@@ -190,11 +204,12 @@ function criarFader(controle) {
 /* ------------------------------ renderizacao ----------------------------- */
 
 function desenharControles(lista) {
+  listaControles = Array.isArray(lista) ? lista : [];
   faders.clear();
   elCanais.textContent = '';
   elMestre.textContent = '';
 
-  for (const controle of lista) {
+  for (const controle of listaControles) {
     const comp = criarFader(controle);
     faders.set(controle.id, comp);
     if (controle.type === 'master') elMestre.appendChild(comp.no);
@@ -203,7 +218,10 @@ function desenharControles(lista) {
 
   // Sem nenhum master definido, o painel lateral so ocuparia espaco a toa.
   elMestre.style.display = elMestre.childElementCount ? '' : 'none';
+
   atualizarRodape();
+  atualizarVazio();
+  if (elAjustes.open) desenharListaAjustes();
 }
 
 function aplicarEstado(valores, mutes) {
@@ -227,7 +245,6 @@ const fila = new Map();
 let timerFila = null;
 
 function enviar(objeto) {
-  if (modoDemo) return;
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(objeto));
   }
@@ -266,14 +283,10 @@ function conectar() {
     return;
   }
 
-  if (!modoDemo) {
-    definirConexao(tentativas === 0 ? 'ligando' : 'offline', tentativas === 0 ? 'ligando' : 'reconectando');
-  }
+  definirConexao(tentativas === 0 ? 'ligando' : 'offline', tentativas === 0 ? 'ligando' : 'reconectando');
 
-  let alvo;
   try {
-    alvo = urlDoBridge();
-    socket = new WebSocket(alvo);
+    socket = new WebSocket(urlDoBridge());
   } catch {
     agendarReconexao();
     return;
@@ -281,9 +294,10 @@ function conectar() {
 
   socket.addEventListener('open', () => {
     tentativas = 0;
-    modoDemo = false;
-    checagemFeita = false;
+    conectado = true;
     definirConexao('online', 'conectado');
+    atualizarRodape();
+    atualizarVazio();
     manterTelaAcesa();
   });
 
@@ -296,18 +310,30 @@ function conectar() {
     }
     if (!msg || typeof msg !== 'object') return;
 
-    if (msg.type === 'controls') {
-      desenharControles(msg.controls || []);
-    } else if (msg.type === 'state') {
-      aplicarEstado(msg.values, msg.mutes);
-    } else if (msg.type === 'status') {
-      statusMidi = msg.midi || null;
-      atualizarRodape();
+    switch (msg.type) {
+      case 'controls':
+        desenharControles(msg.controls || []);
+        break;
+      case 'state':
+        aplicarEstado(msg.values, msg.mutes);
+        break;
+      case 'status':
+        statusMidi = msg.midi || null;
+        atualizarRodape();
+        break;
+      default:
+        if (msg.type && msg.type.startsWith('learn:')) receberDoAssistente(msg);
     }
   });
 
   socket.addEventListener('close', () => {
-    if (!modoDemo) definirConexao('offline', 'reconectando');
+    conectado = false;
+    definirConexao('offline', 'reconectando');
+    atualizarRodape();
+    atualizarVazio();
+    if (assistente.ativo) {
+      mostrarErroAssistente('A conexão com o bridge caiu. Refaça quando reconectar.');
+    }
     agendarReconexao();
   });
 
@@ -318,59 +344,280 @@ function conectar() {
 
 function agendarReconexao() {
   tentativas++;
-  verificarSeExisteBridge();
-
   if (timerReconexao) return;
-
-  // Em demonstracao nao existe bridge para voltar: basta espiar de vez em
-  // quando, em vez de ficar tentando a cada poucos segundos e gastar bateria.
-  const espera = modoDemo
-    ? ESPERA_DEMO
-    : Math.min(BACKOFF_MAX, 500 * Math.pow(2, Math.min(tentativas, 4)));
+  const espera = Math.min(BACKOFF_MAX, 500 * Math.pow(2, Math.min(tentativas, 4)));
   timerReconexao = setTimeout(() => {
     timerReconexao = null;
     conectar();
   }, espera);
 }
 
-/**
- * O WebSocket falhou. Antes de desistir, pergunta pelo HTTP se existe um bridge
- * ali. Se existir, o problema e passageiro e continuamos tentando. Se nao
- * existir (pagina servida por uma hospedagem qualquer, sem o Raspberry Pi),
- * entra em demonstracao para a interface continuar navegavel.
- */
-async function verificarSeExisteBridge() {
-  if (checagemFeita || modoDemo || faders.size > 0) return;
-  checagemFeita = true;
+/* ------------------------------- ajustes --------------------------------- */
 
-  try {
-    const base = urlDoBridge().replace(/^ws/, 'http').replace(/\/+$/, '');
-    const resposta = await fetch(base + '/api/controls', { cache: 'no-store' });
-    const dados = await resposta.json();
-    if (resposta.ok && Array.isArray(dados.controls)) {
-      checagemFeita = false; // existe bridge: vale a pena continuar tentando
-      return;
-    }
-  } catch {
-    // sem resposta, ou resposta que nao e do bridge: cai na demonstracao
+function desenharListaAjustes() {
+  elListaControles.textContent = '';
+
+  if (!listaControles.length) {
+    const vazio = document.createElement('li');
+    vazio.className = 'lista__vazio';
+    vazio.textContent = 'Nenhum controle ainda.';
+    elListaControles.appendChild(vazio);
+    return;
   }
 
-  entrarEmDemo();
+  for (const controle of listaControles) {
+    const item = document.createElement('li');
+    item.className = 'lista__item';
+
+    const info = document.createElement('div');
+    info.className = 'lista__info';
+
+    const nome = document.createElement('span');
+    nome.className = 'lista__nome';
+    nome.textContent = controle.label;
+
+    const estado = document.createElement('span');
+    estado.className = 'lista__estado';
+    estado.textContent = controle.calibrated
+      ? (controle.type === 'master' ? 'volume geral' : controle.type === 'reverb' ? 'reverb' : 'canal')
+      : 'falta calibrar';
+    if (!controle.calibrated) estado.classList.add('lista__estado--pendente');
+
+    info.append(nome, estado);
+
+    const acoes = document.createElement('div');
+    acoes.className = 'lista__acoes';
+
+    const calibrar = document.createElement('button');
+    calibrar.className = 'botao botao--pequeno';
+    calibrar.type = 'button';
+    calibrar.textContent = controle.calibrated ? 'Recalibrar' : 'Calibrar';
+    calibrar.addEventListener('click', () => {
+      elAjustes.close();
+      abrirAssistente(controle);
+    });
+
+    const remover = document.createElement('button');
+    remover.className = 'botao botao--pequeno botao--fantasma';
+    remover.type = 'button';
+    remover.textContent = 'Remover';
+    remover.addEventListener('click', () => {
+      if (!confirm('Remover "' + controle.label + '" do seu monitor?')) return;
+      enviar({ type: 'controle:remover', control: controle.id });
+    });
+
+    acoes.append(calibrar, remover);
+    item.append(info, acoes);
+    elListaControles.appendChild(item);
+  }
 }
 
-function entrarEmDemo() {
-  modoDemo = true;
-  statusMidi = null;
-  definirConexao('demo', 'demonstração');
-  desenharControles(CONTROLES_DEMO);
-  aplicarEstado(
-    {
-      bumbo: 0.6, caixa: 0.55, chimbal: 0.45, tons: 0.45, baixo: 0.65,
-      guitarra: 0.45, violao: 0.45, teclado: 0.5, voz1: 0.7, voz2: 0.6,
-      coral: 0.5, clique: 0.75, reverb: 0.3, geral: 0.6
-    },
-    null
-  );
+document.getElementById('btnAjustes').addEventListener('click', () => {
+  desenharListaAjustes();
+  elAjustes.showModal();
+});
+
+document.getElementById('btnFecharAjustes').addEventListener('click', () => elAjustes.close());
+
+document.getElementById('btnAdicionar').addEventListener('click', () => {
+  elAjustes.close();
+  abrirAssistente(null);
+});
+
+elVazioAcao.addEventListener('click', () => abrirAssistente(null));
+
+/* ------------------------- assistente de calibracao ---------------------- */
+
+const assistente = {
+  ativo: false,
+  controle: null,  // null quando e um controle novo
+  etapa: 'nome',   // nome | min | max | salvando | fim
+  tipo: 'canal'
+};
+
+const elEtapaNome = document.getElementById('etapaNome');
+const elEtapaCaptura = document.getElementById('etapaCaptura');
+const elEtapaFim = document.getElementById('etapaFim');
+const elAssTitulo = document.getElementById('assTitulo');
+const elAssNome = document.getElementById('assNome');
+const elAssTipo = document.getElementById('assTipo');
+const elAssInstrucao = document.getElementById('assInstrucao');
+const elAssContador = document.getElementById('assContador');
+const elAssHex = document.getElementById('assHex');
+const elAssResumo = document.getElementById('assResumo');
+const elAssErro = document.getElementById('assErro');
+const elAssSeguir = document.getElementById('assSeguir');
+const elAssCancelar = document.getElementById('assCancelar');
+
+function abrirAssistente(controle) {
+  if (!conectado) {
+    alert('Sem conexão com o bridge. A calibração precisa falar com a mesa.');
+    return;
+  }
+
+  assistente.ativo = true;
+  assistente.controle = controle;
+  assistente.etapa = 'nome';
+  assistente.tipo = controle ? controle.type : 'canal';
+
+  elAssTitulo.textContent = controle ? 'Recalibrar ' + controle.label : 'Novo controle';
+  elAssNome.value = controle ? controle.label : '';
+  marcarTipo(assistente.tipo);
+  esconderErroAssistente();
+  desenharEtapa();
+  elAssistente.showModal();
+  if (!controle) setTimeout(() => elAssNome.focus(), 60);
+}
+
+function marcarTipo(tipo) {
+  assistente.tipo = tipo;
+  for (const botao of elAssTipo.querySelectorAll('[data-tipo]')) {
+    botao.setAttribute('aria-pressed', botao.dataset.tipo === tipo ? 'true' : 'false');
+  }
+}
+
+elAssTipo.addEventListener('click', (ev) => {
+  const botao = ev.target.closest('[data-tipo]');
+  if (botao) marcarTipo(botao.dataset.tipo);
+});
+
+function desenharEtapa() {
+  elEtapaNome.hidden = assistente.etapa !== 'nome';
+  elEtapaCaptura.hidden = !(assistente.etapa === 'min' || assistente.etapa === 'max');
+  elEtapaFim.hidden = assistente.etapa !== 'fim';
+
+  if (assistente.etapa === 'nome') {
+    elAssSeguir.textContent = 'Continuar';
+    elAssSeguir.disabled = false;
+  } else if (assistente.etapa === 'min') {
+    elAssInstrucao.textContent =
+      'Na mesa, leve o send de "' + nomeAtual() + '" para o seu Aux até o MÍNIMO, tudo embaixo.';
+    elAssSeguir.textContent = 'Capturei o mínimo';
+    elAssSeguir.disabled = false;
+    zerarMedidor();
+  } else if (assistente.etapa === 'max') {
+    elAssInstrucao.textContent = 'Agora leve o mesmo controle até o MÁXIMO, tudo em cima.';
+    elAssSeguir.textContent = 'Capturei o máximo';
+    elAssSeguir.disabled = false;
+    zerarMedidor();
+  } else if (assistente.etapa === 'salvando') {
+    elAssSeguir.textContent = 'Salvando';
+    elAssSeguir.disabled = true;
+  } else if (assistente.etapa === 'fim') {
+    elAssSeguir.textContent = 'Concluir';
+    elAssSeguir.disabled = false;
+  }
+}
+
+function nomeAtual() {
+  return elAssNome.value.trim() || (assistente.controle ? assistente.controle.label : 'controle');
+}
+
+function zerarMedidor() {
+  elAssContador.textContent = 'esperando a mesa falar';
+  elAssHex.textContent = '';
+  elAssContador.classList.remove('medidor__texto--ativo');
+}
+
+function mostrarErroAssistente(texto) {
+  elAssErro.textContent = texto;
+  elAssErro.hidden = false;
+}
+
+function esconderErroAssistente() {
+  elAssErro.hidden = true;
+  elAssErro.textContent = '';
+}
+
+elAssSeguir.addEventListener('click', () => {
+  esconderErroAssistente();
+
+  if (assistente.etapa === 'nome') {
+    const nome = elAssNome.value.trim();
+    if (!nome) {
+      mostrarErroAssistente('Dê um nome para este controle.');
+      return;
+    }
+    enviar({
+      type: 'learn:iniciar',
+      control: assistente.controle ? assistente.controle.id : null,
+      label: nome,
+      kind: assistente.tipo
+    });
+    assistente.etapa = 'min';
+    desenharEtapa();
+    return;
+  }
+
+  if (assistente.etapa === 'min' || assistente.etapa === 'max') {
+    enviar({ type: 'learn:capturar', step: assistente.etapa });
+    return;
+  }
+
+  if (assistente.etapa === 'fim') {
+    fecharAssistente(false);
+  }
+});
+
+elAssCancelar.addEventListener('click', () => fecharAssistente(true));
+
+elAssistente.addEventListener('cancel', (ev) => {
+  ev.preventDefault();
+  fecharAssistente(true);
+});
+
+function fecharAssistente(avisarBridge) {
+  if (avisarBridge && assistente.ativo) enviar({ type: 'learn:cancelar' });
+  assistente.ativo = false;
+  elAssistente.close();
+}
+
+/** Mensagens learn:* vindas do bridge. */
+function receberDoAssistente(msg) {
+  if (msg.type === 'learn:midi') {
+    if (!assistente.ativo) return;
+    elAssContador.textContent = 'a mesa enviou ' + msg.count + ' mensagens';
+    elAssContador.classList.add('medidor__texto--ativo');
+    elAssHex.textContent = msg.hex;
+    return;
+  }
+
+  if (msg.type === 'learn:capturado') {
+    if (msg.step === 'min') {
+      assistente.etapa = 'max';
+      desenharEtapa();
+    } else {
+      assistente.etapa = 'salvando';
+      desenharEtapa();
+      enviar({ type: 'learn:salvar' });
+    }
+    return;
+  }
+
+  if (msg.type === 'learn:salvo') {
+    assistente.etapa = 'fim';
+
+    const detalhe =
+      'valor no byte ' + msg.bytes.offset + ', ' + msg.bytes.length + ' byte(s), ' +
+      'faixa ' + msg.faixa.rawMin + ' a ' + msg.faixa.rawMax;
+
+    elAssResumo.textContent = '"' + msg.control.label + '" já responde no seu fone.';
+    elAssResumo.dataset.detalhe = detalhe;
+
+    if (msg.avisos && msg.avisos.length) {
+      mostrarErroAssistente(msg.avisos.join(' '));
+    }
+    desenharEtapa();
+    return;
+  }
+
+  if (msg.type === 'learn:erro') {
+    if (assistente.etapa === 'salvando') {
+      assistente.etapa = 'min';
+      desenharEtapa();
+    }
+    mostrarErroAssistente(msg.message || 'Não consegui aprender esse controle.');
+  }
 }
 
 /* ------------------------- painel de conexao ----------------------------- */
@@ -392,9 +639,6 @@ elPainel.addEventListener('close', () => {
 
   // Reconecta ja com o endereco novo, do zero.
   tentativas = 0;
-  modoDemo = false;
-  checagemFeita = false;
-  faders.clear();
   if (socket) {
     try { socket.close(); } catch { /* ignora */ }
   }
@@ -435,4 +679,5 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+atualizarVazio();
 conectar();

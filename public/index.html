@@ -29,21 +29,105 @@
       <span class="marca__sub">01V96</span>
     </div>
 
-    <button class="conexao" id="conexao" type="button" aria-label="Situação da conexão">
-      <span class="conexao__ponto" aria-hidden="true"></span>
-      <span class="conexao__texto" id="conexaoTexto">ligando</span>
-    </button>
+    <div class="topo__acoes">
+      <button class="conexao" id="conexao" type="button" aria-label="Situação da conexão">
+        <span class="conexao__ponto" aria-hidden="true"></span>
+        <span class="conexao__texto" id="conexaoTexto">ligando</span>
+      </button>
+
+      <button class="icone-botao" id="btnAjustes" type="button" aria-label="Ajustes dos controles">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" />
+        </svg>
+      </button>
+    </div>
   </header>
 
   <main class="palco">
     <section class="canais" id="canais" aria-label="Canais do meu fone"></section>
     <aside class="mestre" id="mestre" aria-label="Volume geral do fone"></aside>
+
+    <div class="vazio" id="vazio" hidden>
+      <p class="vazio__titulo" id="vazioTitulo">Sem conexão com o bridge</p>
+      <p class="vazio__texto" id="vazioTexto">
+        Confira se o programa está rodando na máquina ligada na mesa e se o
+        celular está na mesma rede Wi-Fi.
+      </p>
+      <button class="botao" id="vazioAcao" type="button" hidden>Calibrar o primeiro controle</button>
+    </div>
   </main>
 
   <footer class="rodape">
-    <span class="rodape__texto" id="rodape">carregando controles</span>
+    <span class="rodape__texto" id="rodape">procurando o bridge</span>
   </footer>
 
+  <!-- Ajustes: a lista de controles do meu fone -->
+  <dialog class="painel painel--alto" id="ajustes">
+    <div class="painel__conteudo">
+      <h2 class="painel__titulo">Controles do meu fone</h2>
+      <p class="painel__ajuda">
+        Cada controle é o send de um canal da mesa para o Aux do seu fone.
+        Calibrar é mostrar para o programa qual controle é qual, mexendo nele
+        na mesa uma vez.
+      </p>
+
+      <ul class="lista" id="listaControles"></ul>
+
+      <button class="botao botao--largo" id="btnAdicionar" type="button">Adicionar controle</button>
+
+      <div class="painel__acoes">
+        <button class="botao botao--fantasma" id="btnFecharAjustes" type="button">Fechar</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Assistente de calibração -->
+  <dialog class="painel" id="assistente">
+    <div class="painel__conteudo">
+      <h2 class="painel__titulo" id="assTitulo">Calibrar controle</h2>
+
+      <section class="etapa" id="etapaNome" hidden>
+        <label class="painel__rotulo" for="assNome">Nome que aparece no fader</label>
+        <input class="painel__campo" id="assNome" type="text" maxlength="40"
+               placeholder="Bumbo" autocomplete="off">
+
+        <p class="painel__rotulo">Tipo</p>
+        <div class="opcoes" id="assTipo">
+          <button class="opcoes__item" type="button" data-tipo="canal">Canal</button>
+          <button class="opcoes__item" type="button" data-tipo="reverb">Reverb</button>
+          <button class="opcoes__item" type="button" data-tipo="master">Volume geral</button>
+        </div>
+      </section>
+
+      <section class="etapa" id="etapaCaptura" hidden>
+        <p class="etapa__instrucao" id="assInstrucao"></p>
+
+        <div class="medidor">
+          <span class="medidor__texto" id="assContador">esperando a mesa falar</span>
+          <code class="medidor__hex" id="assHex"></code>
+        </div>
+
+        <p class="painel__ajuda" id="assDica">
+          Segure a tecla do seu Aux na mesa e mova o fader desse canal. A barra
+          acima tem que se mexer enquanto você move.
+        </p>
+      </section>
+
+      <section class="etapa" id="etapaFim" hidden>
+        <p class="etapa__ok" id="assResumo"></p>
+      </section>
+
+      <p class="painel__erro" id="assErro" hidden></p>
+
+      <div class="painel__acoes">
+        <button class="botao botao--fantasma" id="assCancelar" type="button">Cancelar</button>
+        <button class="botao" id="assSeguir" type="button">Continuar</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Endereço do bridge -->
   <dialog class="painel" id="painel">
     <form method="dialog" class="painel__conteudo">
       <h2 class="painel__titulo">Conexão</h2>
@@ -55,7 +139,7 @@
              placeholder="ws://monitor.local:8080" autocomplete="off" spellcheck="false">
       <p class="painel__ajuda">
         Deixe em branco para usar o mesmo endereço desta página. Preencha só se o
-        app estiver hospedado fora do Raspberry Pi.
+        app estiver hospedado fora da máquina ligada na mesa.
       </p>
 
       <div class="painel__acoes">

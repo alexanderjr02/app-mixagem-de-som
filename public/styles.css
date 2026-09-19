@@ -25,6 +25,10 @@
 
 * { box-sizing: border-box; }
 
+/* Sem isto, qualquer classe com "display" vence o atributo hidden e o elemento
+   continua na tela. Vale para as etapas do assistente e para o aviso de vazio. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -103,6 +107,38 @@ body {
   padding-top: 2px;
 }
 
+.topo__acoes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.icone-botao {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 34px;
+  padding: 0;
+  background: var(--superficie-2);
+  border: 1px solid var(--linha);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.icone-botao:active { background: var(--superficie-3); }
+
+.icone-botao svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: var(--texto-2);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+.icone-botao:hover svg { stroke: var(--texto); }
+
 .conexao {
   display: flex;
   align-items: center;
@@ -155,16 +191,51 @@ body[data-conexao="demo"] .conexao__ponto {
 /* ------------------------------ palco ------------------------------------ */
 
 .palco {
+  position: relative;
   display: flex;
   min-height: 0;
   min-width: 0;
-  transition: opacity 0.18s ease;
 }
 
-body[data-conexao="offline"] .palco {
-  opacity: 0.35;
+/* Sem bridge, os faders ficam apagados e travados: mexer neles nao mudaria
+   nada no seu fone, e pior, daria a impressao de que mudou. */
+body[data-conexao="offline"] .canais,
+body[data-conexao="offline"] .mestre,
+body[data-conexao="ligando"] .canais,
+body[data-conexao="ligando"] .mestre {
+  opacity: 0.25;
   pointer-events: none;
 }
+
+.vazio {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  background: var(--fundo);
+}
+
+.vazio__titulo {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--texto);
+}
+
+.vazio__texto {
+  margin: 0;
+  max-width: 34ch;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--texto-2);
+}
+
+.vazio .botao { margin-top: 6px; }
 
 .canais {
   flex: 1;
@@ -439,6 +510,181 @@ body[data-conexao="offline"] .palco {
   border-color: var(--linha);
   color: var(--texto-2);
   font-weight: 400;
+}
+
+.botao--pequeno {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.botao--largo {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.botao:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.painel--alto .painel__conteudo {
+  max-height: min(78dvh, 640px);
+  overflow-y: auto;
+}
+
+.painel__erro {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--superficie-2);
+  border: 1px solid var(--linha-forte);
+  border-radius: 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--texto);
+}
+
+/* ---------------------- lista de controles (ajustes) --------------------- */
+
+.lista {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.lista__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--superficie-2);
+  border: 1px solid var(--linha);
+  border-radius: 10px;
+}
+
+.lista__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.lista__nome {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lista__estado {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--texto-3);
+}
+
+.lista__estado--pendente { color: var(--texto); }
+
+.lista__acoes {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.lista__vazio {
+  padding: 14px 12px;
+  font-size: 13px;
+  color: var(--texto-3);
+  text-align: center;
+}
+
+/* ------------------------- assistente de calibracao ---------------------- */
+
+.etapa {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.etapa__instrucao {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--texto);
+}
+
+.etapa__ok {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--texto);
+}
+
+.etapa__ok::after {
+  content: attr(data-detalhe);
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--texto-3);
+}
+
+.opcoes {
+  display: flex;
+  gap: 6px;
+}
+
+.opcoes__item {
+  flex: 1;
+  padding: 10px 6px;
+  background: var(--superficie-2);
+  border: 1px solid var(--linha);
+  border-radius: 9px;
+  color: var(--texto-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.opcoes__item[aria-pressed="true"] {
+  background: var(--texto);
+  border-color: var(--texto);
+  color: var(--fundo);
+  font-weight: 600;
+}
+
+/* Medidor ao vivo: mostra que a mesa esta mesmo mandando mensagem. */
+.medidor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--superficie-2);
+  border: 1px solid var(--linha);
+  border-radius: 10px;
+  min-height: 62px;
+}
+
+.medidor__texto {
+  font-size: 13px;
+  color: var(--texto-3);
+}
+
+.medidor__texto--ativo {
+  color: var(--texto);
+  font-weight: 500;
+}
+
+.medidor__hex {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--texto-3);
+  word-break: break-all;
 }
 
 /* ---------------------------- tela grande -------------------------------- */
