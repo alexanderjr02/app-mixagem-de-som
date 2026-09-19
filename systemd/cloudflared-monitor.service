@@ -1,0 +1,18 @@
+[Unit]
+Description=Cloudflare Tunnel do monitor 01V96
+After=network-online.target monitor-01v96.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+# Troque NOME-DO-TUNEL pelo nome que voce criou em "cloudflared tunnel create".
+ExecStart=/usr/bin/cloudflared tunnel run NOME-DO-TUNEL
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudflared-monitor
+
+[Install]
+WantedBy=multi-user.target

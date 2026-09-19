@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Monitor 01V96</title>
+<meta name="description" content="Mixagem do monitor pessoal in-ear na Yamaha 01V96">
+<meta name="theme-color" content="#08080a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Monitor">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icone.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icone-192.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-conexao="ligando">
+
+  <header class="topo">
+    <div class="marca">
+      <svg class="marca__icone" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 3v18M12 3v18M18 3v18" />
+        <rect x="3" y="7" width="6" height="3" rx="1.5" />
+        <rect x="9" y="13" width="6" height="3" rx="1.5" />
+        <rect x="15" y="9" width="6" height="3" rx="1.5" />
+      </svg>
+      <span class="marca__texto">Monitor</span>
+      <span class="marca__sub">01V96</span>
+    </div>
+
+    <button class="conexao" id="conexao" type="button" aria-label="Situacao da conexao">
+      <span class="conexao__ponto" aria-hidden="true"></span>
+      <span class="conexao__texto" id="conexaoTexto">ligando</span>
+    </button>
+  </header>
+
+  <main class="palco">
+    <section class="canais" id="canais" aria-label="Canais do meu fone"></section>
+    <aside class="mestre" id="mestre" aria-label="Volume geral do fone"></aside>
+  </main>
+
+  <footer class="rodape">
+    <span class="rodape__texto" id="rodape">carregando controles</span>
+  </footer>
+
+  <dialog class="painel" id="painel">
+    <form method="dialog" class="painel__conteudo">
+      <h2 class="painel__titulo">Conexao</h2>
+
+      <p class="painel__linha" id="painelInfo">-</p>
+
+      <label class="painel__rotulo" for="painelEndereco">Endereco do bridge</label>
+      <input class="painel__campo" id="painelEndereco" type="text" inputmode="url"
+             placeholder="ws://monitor.local:8080" autocomplete="off" spellcheck="false">
+      <p class="painel__ajuda">
+        Deixe em branco para usar o mesmo endereco desta pagina. Preencha so se o
+        app estiver hospedado fora do Raspberry Pi.
+      </p>
+
+      <div class="painel__acoes">
+        <button class="botao botao--fantasma" value="cancelar" type="submit">Cancelar</button>
+        <button class="botao" value="salvar" type="submit" id="painelSalvar">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="moldeFader">
+    <div class="fader">
+      <div class="fader__valor"><span data-valor>0</span></div>
+
+      <div class="fader__trilho" data-trilho role="slider" tabindex="0"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span class="fader__marca" style="bottom:25%"></span>
+        <span class="fader__marca" style="bottom:50%"></span>
+        <span class="fader__marca" style="bottom:75%"></span>
+        <div class="fader__nivel" data-nivel></div>
+        <div class="fader__punho" data-punho>
+          <span class="fader__risco"></span>
+        </div>
+      </div>
+
+      <button class="fader__mudo" type="button" data-mudo aria-pressed="false">mudo</button>
+      <div class="fader__rotulo" data-rotulo>-</div>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

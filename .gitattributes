@@ -1,0 +1,4 @@
+# O projeto roda no Raspberry Pi (Linux). Guardar tudo com fim de linha LF
+# evita surpresa nos arquivos de servico do systemd depois do clone.
+* text=auto eol=lf
+*.png binary

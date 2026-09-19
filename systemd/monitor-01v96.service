@@ -1,0 +1,24 @@
+[Unit]
+Description=Monitor 01V96 (bridge MIDI + app do celular)
+Documentation=https://github.com/alexanderjr02/app-mixagem-de-som
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=audio
+WorkingDirectory=/home/pi/app-mixagem-de-som
+ExecStart=/usr/bin/node /home/pi/app-mixagem-de-som/src/bridge.js
+Environment=NODE_ENV=production
+
+# Se cair (cabo USB solto, mesa desligada), sobe de novo sozinho.
+Restart=always
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=monitor-01v96
+
+[Install]
+WantedBy=multi-user.target

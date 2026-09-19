@@ -1,0 +1,23 @@
+{
+  "name": "monitor-01v96",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mixagem de monitor pessoal (in-ear) para Yamaha 01V96, controlada pelo celular via Wi-Fi",
+  "main": "src/bridge.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/bridge.js",
+    "learn": "node src/learn.js",
+    "monitor": "node src/monitor.js",
+    "portas": "node src/portas.js",
+    "icones": "node scripts/gerar-icones.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "midi": "^2.0.0"
+  }
+}
