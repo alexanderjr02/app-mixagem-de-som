@@ -49,6 +49,12 @@
     <aside class="mestre" id="mestre" aria-label="Volume geral do fone"></aside>
 
     <div class="vazio" id="vazio" hidden>
+      <svg class="vazio__arte" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M12 6v36M24 6v36M36 6v36" />
+        <rect x="6" y="14" width="12" height="6" rx="3" />
+        <rect x="18" y="26" width="12" height="6" rx="3" />
+        <rect x="30" y="19" width="12" height="6" rx="3" />
+      </svg>
       <p class="vazio__titulo" id="vazioTitulo">Sem conexão com o bridge</p>
       <p class="vazio__texto" id="vazioTexto">
         Confira se o programa está rodando na máquina ligada na mesa e se o
@@ -63,27 +69,28 @@
   </footer>
 
   <!-- Ajustes: a lista de controles do meu fone -->
-  <dialog class="painel painel--alto" id="ajustes">
-    <div class="painel__conteudo">
+  <dialog class="painel" id="ajustes">
+    <div class="painel__conteudo painel__conteudo--folha">
       <h2 class="painel__titulo">Controles do meu fone</h2>
       <p class="painel__ajuda">
         Cada controle é o send de um canal da mesa para o Aux do seu fone.
-        Calibrar é mostrar para o programa qual controle é qual, mexendo nele
-        na mesa uma vez.
+        Calibrar é mostrar ao programa qual controle é qual, mexendo nele na
+        mesa uma vez.
       </p>
 
-      <section class="bloco" id="blocoMesa">
-        <h3 class="bloco__titulo">Mesa</h3>
-        <p class="bloco__estado" id="mesaEstado">procurando</p>
-        <select class="painel__campo" id="mesaPorta" aria-label="Porta da mesa"></select>
-      </section>
+      <div class="painel__corpo">
+        <section class="bloco" id="blocoMesa">
+          <h3 class="bloco__titulo">Mesa</h3>
+          <p class="bloco__estado" id="mesaEstado">procurando</p>
+          <select class="painel__campo" id="mesaPorta" aria-label="Porta da mesa"></select>
+        </section>
 
-      <ul class="lista" id="listaControles"></ul>
-
-      <button class="botao botao--largo" id="btnAdicionar" type="button">Adicionar controle</button>
+        <ul class="lista" id="listaControles"></ul>
+      </div>
 
       <div class="painel__acoes">
         <button class="botao botao--fantasma" id="btnFecharAjustes" type="button">Fechar</button>
+        <button class="botao" id="btnAdicionar" type="button">Adicionar controle</button>
       </div>
     </div>
   </dialog>
@@ -166,6 +173,7 @@
         <span class="fader__marca" style="bottom:75%"></span>
         <div class="fader__nivel" data-nivel></div>
         <div class="fader__punho" data-punho>
+          <span class="fader__risco"></span>
           <span class="fader__risco"></span>
         </div>
       </div>

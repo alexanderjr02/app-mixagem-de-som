@@ -298,6 +298,7 @@ function conectar() {
     definirConexao('online', 'conectado');
     atualizarRodape();
     atualizarVazio();
+    atualizarBotaoAjustes();
     manterTelaAcesa();
   });
 
@@ -335,6 +336,8 @@ function conectar() {
     definirConexao('offline', 'reconectando');
     atualizarRodape();
     atualizarVazio();
+    atualizarBotaoAjustes();
+    if (elAjustes.open) elAjustes.close();
     if (assistente.ativo) {
       mostrarErroAssistente('A conexão com o bridge caiu. Refaça quando reconectar.');
     }
@@ -436,9 +439,11 @@ function desenharPortasDaMesa(msg) {
   const nomes = msg.saidas || [];
   elMesaPorta.textContent = '';
 
+  // Um select sem nenhuma opcao vira aquele "Sem Opções" do iPhone, que nao
+  // explica nada. Sempre existe pelo menos uma linha dizendo o que esta havendo.
   const automatico = document.createElement('option');
   automatico.value = '';
-  automatico.textContent = nomes.length ? 'Procurar sozinho' : 'Nenhuma porta MIDI encontrada';
+  automatico.textContent = nomes.length ? 'Procurar sozinho' : 'Nenhuma porta MIDI no cabo';
   elMesaPorta.appendChild(automatico);
 
   for (const nome of nomes) {
@@ -456,12 +461,28 @@ elMesaPorta.addEventListener('change', () => {
   enviar({ type: 'midi:usar', porta: elMesaPorta.value });
 });
 
-document.getElementById('btnAjustes').addEventListener('click', () => {
+const elBtnAjustes = document.getElementById('btnAjustes');
+
+elBtnAjustes.addEventListener('click', () => {
+  // Sem bridge nao ha nada para ajustar: a lista, a mesa e a calibracao todas
+  // dependem dele. Abrir a tela so mostraria campos vazios.
+  if (!conectado) {
+    elPainelEndereco.value = localStorage.getItem(CHAVE_BRIDGE) || '';
+    elPainelInfo.textContent =
+      'Ainda não achei o bridge.\nEndereço em uso: ' + urlDoBridge();
+    elPainel.showModal();
+    return;
+  }
   desenharListaAjustes();
   desenharEstadoDaMesa();
   enviar({ type: 'midi:portas' });
   elAjustes.showModal();
 });
+
+/** O botao de ajustes fica apagado enquanto nao ha bridge. */
+function atualizarBotaoAjustes() {
+  elBtnAjustes.classList.toggle('icone-botao--apagado', !conectado);
+}
 
 document.getElementById('btnFecharAjustes').addEventListener('click', () => elAjustes.close());
 
@@ -622,7 +643,8 @@ function fecharAssistente(avisarBridge) {
 function receberDoAssistente(msg) {
   if (msg.type === 'learn:midi') {
     if (!assistente.ativo) return;
-    elAssContador.textContent = 'a mesa enviou ' + msg.count + ' mensagens';
+    elAssContador.textContent =
+      'a mesa enviou ' + msg.count + (msg.count === 1 ? ' mensagem' : ' mensagens');
     elAssContador.classList.add('medidor__texto--ativo');
     elAssHex.textContent = msg.hex;
     return;
@@ -726,4 +748,5 @@ if ('serviceWorker' in navigator) {
 }
 
 atualizarVazio();
+atualizarBotaoAjustes();
 conectar();
