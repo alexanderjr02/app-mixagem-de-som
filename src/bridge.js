@@ -28,7 +28,7 @@ try {
 }
 
 const configArquivo = require('./config');
-const { abrirSaida, abrirEntrada, midiDisponivel, mensagemErroMidi } = require('./midi-io');
+const { abrirSaida, abrirEntrada, listarPortas, midiDisponivel, mensagemErroMidi } = require('./midi-io');
 const mesa = require('./yamaha01v96');
 
 const DIR_PUBLIC = path.join(configArquivo.RAIZ, 'public');
@@ -101,21 +101,68 @@ function gravarControles(transformar) {
 // MIDI
 // ---------------------------------------------------------------------------
 
-const saidaMidi = abrirSaida(cfg.midi.saida);
-const entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+// As portas sao procuradas sozinhas quando o config.json nao diz qual usar.
+let saidaMidi = abrirSaida(cfg.midi.saida);
+let entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
 
-if (saidaMidi.simulado) {
-  console.warn('[midi] SAIDA em modo simulado. Motivo: ' + saidaMidi.motivo);
-  console.warn('[midi] A interface funciona normalmente, mas nada chega na mesa.');
-} else {
-  console.log('[midi] saida: ' + saidaMidi.nome);
+function contarMidi(inicial) {
+  if (saidaMidi.simulado) {
+    console.warn('[midi] sem mesa na saida: ' + saidaMidi.motivo);
+    if (inicial) console.warn('[midi] o app funciona, mas nada chega na mesa ainda.');
+  } else {
+    console.log('[midi] saida: ' + saidaMidi.nome);
+  }
+
+  if (entradaMidi.simulado) {
+    console.warn('[midi] sem mesa na entrada: ' + entradaMidi.motivo);
+  } else {
+    console.log('[midi] entrada: ' + entradaMidi.nome);
+  }
 }
 
-if (entradaMidi.simulado) {
-  console.warn('[midi] ENTRADA em modo simulado. Motivo: ' + entradaMidi.motivo);
-} else {
-  console.log('[midi] entrada: ' + entradaMidi.nome);
+contarMidi(true);
+
+/**
+ * A maquina costuma ligar antes da mesa (ou o cabo USB e trocado de lugar).
+ * Em vez de exigir reiniciar o programa, ele fica espiando de dez em dez
+ * segundos ate a mesa aparecer, e avisa os celulares quando achar.
+ */
+function procurarMesa() {
+  if (!saidaMidi.simulado && !entradaMidi.simulado) return;
+
+  let mudou = false;
+
+  if (saidaMidi.simulado) {
+    const nova = abrirSaida(cfg.midi.saida);
+    if (!nova.simulado) {
+      try { saidaMidi.fechar(); } catch { /* ignora */ }
+      saidaMidi = nova;
+      mudou = true;
+    }
+  }
+
+  if (entradaMidi.simulado) {
+    const nova = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+    if (!nova.simulado) {
+      try { entradaMidi.fechar(); } catch { /* ignora */ }
+      entradaMidi = nova;
+      mudou = true;
+    }
+  }
+
+  if (!mudou) return;
+
+  console.log('[midi] mesa encontrada');
+  contarMidi(false);
+  transmitirStatus();
+
+  // Com a mesa de volta, o mix que esta na tela vale mais que o da mesa.
+  if (cfg.aplicarEstadoAoIniciar) {
+    for (const c of controles) if (mesa.estaCalibrado(c)) agendarEnvio(c.id);
+  }
 }
+
+setInterval(procurarMesa, 10000).unref();
 
 /**
  * Fila de envio. Arrastar um fader gera dezenas de eventos por segundo; em vez
@@ -323,6 +370,23 @@ function anunciarControles() {
   transmitir({ type: 'state', values: estado.valores, mutes: estado.mutes });
 }
 
+function statusAtual() {
+  return {
+    type: 'status',
+    midi: {
+      simulado: saidaMidi.simulado,
+      entradaSimulada: entradaMidi.simulado,
+      saida: saidaMidi.nome,
+      entrada: entradaMidi.nome,
+      motivo: saidaMidi.motivo || null
+    }
+  };
+}
+
+function transmitirStatus() {
+  transmitir(statusAtual());
+}
+
 // ---------------------------------------------------------------------------
 // Servidor HTTP (o app em si)
 // ---------------------------------------------------------------------------
@@ -485,16 +549,7 @@ wss.on('connection', (cliente, req) => {
 
   // Sequencia de boas vindas: lista de faders, situacao do MIDI e estado atual.
   enviarPara(cliente, { type: 'controls', controls: listaParaApp() });
-  enviarPara(cliente, {
-    type: 'status',
-    midi: {
-      simulado: saidaMidi.simulado,
-      entradaSimulada: entradaMidi.simulado,
-      saida: saidaMidi.nome,
-      entrada: entradaMidi.nome,
-      motivo: saidaMidi.motivo || null
-    }
-  });
+  enviarPara(cliente, statusAtual());
   enviarPara(cliente, { type: 'state', values: estado.valores, mutes: estado.mutes });
 
   cliente.on('message', (dados) => {
@@ -572,6 +627,45 @@ wss.on('connection', (cliente, req) => {
         } catch (erro) {
           enviarPara(cliente, { type: 'learn:erro', message: erro.message });
         }
+        return;
+      }
+
+      // Escolher a porta da mesa pelo celular, para nunca precisar editar
+      // arquivo na maquina do rack.
+      case 'midi:portas': {
+        const portas = listarPortas();
+        enviarPara(cliente, {
+          type: 'midi:portas',
+          entradas: portas.entradas,
+          saidas: portas.saidas,
+          escolhida: cfg.midi.saida || null
+        });
+        return;
+      }
+
+      case 'midi:usar': {
+        const escolha = typeof msg.porta === 'string' && msg.porta.trim() ? msg.porta.trim() : null;
+        try {
+          const atual = configArquivo.carregar();
+          atual.midi.saida = escolha;
+          atual.midi.entrada = escolha;
+          configArquivo.salvar(atual);
+        } catch (erro) {
+          enviarPara(cliente, { type: 'learn:erro', message: 'Nao consegui salvar: ' + erro.message });
+          return;
+        }
+
+        cfg.midi.saida = escolha;
+        cfg.midi.entrada = escolha;
+
+        try { saidaMidi.fechar(); } catch { /* ignora */ }
+        try { entradaMidi.fechar(); } catch { /* ignora */ }
+        saidaMidi = abrirSaida(cfg.midi.saida);
+        entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+
+        console.log('[midi] porta escolhida pelo celular: ' + (escolha || 'automatica'));
+        contarMidi(false);
+        transmitirStatus();
         return;
       }
 

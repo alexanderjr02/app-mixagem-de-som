@@ -66,22 +66,53 @@ function listarPortas() {
   return { entradas, saidas };
 }
 
+// Portas que nunca sao a mesa: eco interno do Linux e sintetizador do Windows.
+const IGNORAR = [/midi through/i, /wavetable/i, /microsoft gs/i];
+
+// Na duvida, esses nomes tem cara de 01V96.
+const PREFERIDOS = [/01\s*v\s*96/i, /yamaha/i, /usb.*midi/i, /midi.*usb/i];
+
+/**
+ * Escolhe a porta sozinho, para nao ser preciso configurar nada na maquina da
+ * mesa. Descarta as portas que nunca sao a mesa, prefere quem tem nome de
+ * 01V96 e, se sobrar uma unica candidata, usa ela.
+ */
+function escolherAutomatica(nomes) {
+  const candidatos = nomes
+    .map((nome, indice) => ({ nome, indice }))
+    .filter(({ nome }) => !IGNORAR.some((padrao) => padrao.test(nome)));
+
+  for (const padrao of PREFERIDOS) {
+    const achou = candidatos.find(({ nome }) => padrao.test(nome));
+    if (achou) return achou.indice;
+  }
+
+  if (candidatos.length === 1) return candidatos[0].indice;
+  return -1;
+}
+
 /**
  * Resolve o "spec" do config.json para um indice de porta.
- * Aceita numero (indice) ou texto (parte do nome, sem diferenciar maiuscula).
+ * Aceita numero (indice), texto (parte do nome, sem diferenciar maiuscula),
+ * ou vazio, que significa "acha sozinho".
  * Devolve -1 se nao achou.
  */
 function resolverIndice(spec, nomes) {
   if (typeof spec === 'number' && Number.isInteger(spec)) {
     return spec >= 0 && spec < nomes.length ? spec : -1;
   }
-  if (typeof spec === 'string' && spec.trim()) {
+  if (typeof spec === 'string' && spec.trim() && spec !== 'auto') {
     const alvo = spec.trim().toLowerCase();
     const exato = nomes.findIndex((n) => n.toLowerCase() === alvo);
     if (exato >= 0) return exato;
     return nomes.findIndex((n) => n.toLowerCase().includes(alvo));
   }
-  return -1;
+  return escolherAutomatica(nomes);
+}
+
+/** true quando o config nao manda uma porta especifica. */
+function ehAutomatico(spec) {
+  return spec === null || spec === undefined || spec === '' || spec === 'auto';
 }
 
 /** Objeto de saida que so escreve no terminal, usado no modo simulado. */
@@ -108,10 +139,10 @@ function saidaSimulada(motivo) {
  */
 function abrirSaida(spec) {
   if (!midi) {
-    return saidaSimulada('pacote "midi" nao instalado: ' + mensagemErroMidi());
+    return saidaSimulada('pacote MIDI nao instalado: ' + mensagemErroMidi());
   }
-  if (spec === 'simulado' || spec === null || spec === undefined || spec === '') {
-    return saidaSimulada('nenhuma porta de saida configurada em config.json (midi.saida)');
+  if (spec === 'simulado') {
+    return saidaSimulada('modo simulado pedido no config.json');
   }
 
   const porta = new midi.Output();
@@ -128,9 +159,11 @@ function abrirSaida(spec) {
     const indice = resolverIndice(spec, nomes);
     if (indice < 0) {
       try { porta.closePort(); } catch { /* ignora */ }
+      const lista = nomes.length ? nomes.map((n, i) => i + '=' + n).join(', ') : 'nenhuma';
       return saidaSimulada(
-        'porta de saida "' + spec + '" nao encontrada. Disponiveis: ' +
-          (nomes.length ? nomes.map((n, i) => i + '=' + n).join(', ') : 'nenhuma')
+        ehAutomatico(spec)
+          ? 'nao achei a mesa nas portas MIDI. Disponiveis: ' + lista
+          : 'porta de saida "' + spec + '" nao encontrada. Disponiveis: ' + lista
       );
     }
 
@@ -168,10 +201,8 @@ function portaSaidaReal(porta, nome) {
 function abrirEntrada(spec, aoReceber) {
   const vazia = (motivo) => ({ nome: 'simulado', simulado: true, motivo, fechar() {} });
 
-  if (!midi) return vazia('pacote "midi" nao instalado: ' + mensagemErroMidi());
-  if (spec === 'simulado' || spec === null || spec === undefined || spec === '') {
-    return vazia('nenhuma porta de entrada configurada em config.json (midi.entrada)');
-  }
+  if (!midi) return vazia('pacote MIDI nao instalado: ' + mensagemErroMidi());
+  if (spec === 'simulado') return vazia('modo simulado pedido no config.json');
 
   const porta = new midi.Input();
 
@@ -199,9 +230,11 @@ function abrirEntrada(spec, aoReceber) {
     const indice = resolverIndice(spec, nomes);
     if (indice < 0) {
       try { porta.closePort(); } catch { /* ignora */ }
+      const lista = nomes.length ? nomes.map((n, i) => i + '=' + n).join(', ') : 'nenhuma';
       return vazia(
-        'porta de entrada "' + spec + '" nao encontrada. Disponiveis: ' +
-          (nomes.length ? nomes.map((n, i) => i + '=' + n).join(', ') : 'nenhuma')
+        ehAutomatico(spec)
+          ? 'nao achei a mesa nas portas MIDI. Disponiveis: ' + lista
+          : 'porta de entrada "' + spec + '" nao encontrada. Disponiveis: ' + lista
       );
     }
 
@@ -229,6 +262,7 @@ module.exports = {
   midiDisponivel,
   mensagemErroMidi,
   listarPortas,
+  escolherAutomatica,
   abrirSaida,
   abrirEntrada
 };

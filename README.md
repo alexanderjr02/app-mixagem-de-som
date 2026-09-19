@@ -87,6 +87,20 @@ No painel da mesa: **DISPLAY ACCESS > MIDI/HOST** (menu MIDI / Setup).
 
 ---
 
+## A porta da mesa: ele acha sozinho
+
+Você não precisa configurar qual é a porta MIDI. Ao ligar, o programa procura a
+01V96 entre as portas do sistema, descartando as que nunca são mesa (o
+"Midi Through" do Linux, o sintetizador do Windows).
+
+Duas coisas que evitam dor de cabeça no dia:
+
+- Se a mesa só for ligada **depois** da máquina, ele fica procurando de dez em
+  dez segundos e avisa o celular quando achar. Não precisa reiniciar nada.
+- Se houver mais de um aparelho MIDI e ele ficar em dúvida, ele **não chuta**:
+  abre o app, toque no botão de ajustes e escolha a porta na lista, ali mesmo
+  no celular.
+
 ## Calibrar: pelo próprio celular
 
 Da primeira vez, o app mostra "Nenhum controle ainda". Toque em
@@ -193,7 +207,7 @@ calibração pelo celular escreve aqui.
 
 | Campo | Para que serve |
 |---|---|
-| `midi.entrada` / `midi.saida` | Índice (`1`) ou parte do nome (`"01V96"`). Vazio faz o bridge procurar sozinho a porta |
+| `midi.entrada` / `midi.saida` | Vazio (`null`) faz ele procurar a mesa sozinho, que é o normal. Aceita índice (`1`) ou parte do nome (`"01V96"`). Dá para escolher pelo app, sem editar isto |
 | `midi.intervaloEnvioMs` | De quanto em quanto tempo o lote de mudanças vai para a mesa |
 | `midi.janelaEcoMs` | Tempo em que o bridge ignora o que a mesa devolve logo depois de um envio, para o fader não tremer na mão |
 | `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar |
@@ -254,7 +268,7 @@ vira um `state` enviado para os outros celulares, mantendo todo mundo igual.
 | "Sem conexão com o bridge" | O programa não está rodando. No Pi: `systemctl status monitor-01v96`. No Windows: rode `node src\bridge.js` na pasta para ver o erro |
 | Durante a calibração, o contador fica em zero | Parameter Change **TX** desligado na mesa, ou porta MIDI errada (`USB` x `MIDI`) |
 | Calibrei mas o fader não muda o som | Parameter Change **RX** desligado na mesa |
-| Rodapé diz "sem mesa conectada" | O bridge não achou a porta MIDI. Rode `npm run portas` e confira o cabo |
+| Rodapé diz "sem mesa conectada" | Confira o cabo USB e se a mesa está ligada. Se houver mais de um aparelho MIDI, escolha a porta no botão de ajustes do app |
 | O fader treme sozinho | Desligue o **ECHO** de Parameter Change na mesa, ou aumente `janelaEcoMs` |
 | O endereço mudou de uma semana para outra | Reserve o IP da máquina no roteador |
 | Mudei o app e o celular mostra o antigo | Puxe a tela para atualizar, ou feche e abra o app instalado |

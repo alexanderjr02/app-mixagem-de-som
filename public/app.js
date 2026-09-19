@@ -320,6 +320,10 @@ function conectar() {
       case 'status':
         statusMidi = msg.midi || null;
         atualizarRodape();
+        desenharEstadoDaMesa();
+        break;
+      case 'midi:portas':
+        desenharPortasDaMesa(msg);
         break;
       default:
         if (msg.type && msg.type.startsWith('learn:')) receberDoAssistente(msg);
@@ -412,8 +416,50 @@ function desenharListaAjustes() {
   }
 }
 
+/* ---- qual porta MIDI e a mesa ----------------------------------------- */
+
+const elMesaEstado = document.getElementById('mesaEstado');
+const elMesaPorta = document.getElementById('mesaPorta');
+
+function desenharEstadoDaMesa() {
+  if (!statusMidi) {
+    elMesaEstado.textContent = 'procurando';
+    return;
+  }
+  elMesaEstado.textContent = statusMidi.simulado
+    ? 'nenhuma mesa encontrada no cabo USB'
+    : 'conectada em ' + statusMidi.saida;
+  elMesaEstado.classList.toggle('bloco__estado--alerta', !!statusMidi.simulado);
+}
+
+function desenharPortasDaMesa(msg) {
+  const nomes = msg.saidas || [];
+  elMesaPorta.textContent = '';
+
+  const automatico = document.createElement('option');
+  automatico.value = '';
+  automatico.textContent = nomes.length ? 'Procurar sozinho' : 'Nenhuma porta MIDI encontrada';
+  elMesaPorta.appendChild(automatico);
+
+  for (const nome of nomes) {
+    const opcao = document.createElement('option');
+    opcao.value = nome;
+    opcao.textContent = nome;
+    elMesaPorta.appendChild(opcao);
+  }
+
+  elMesaPorta.value = msg.escolhida || '';
+  elMesaPorta.disabled = !nomes.length;
+}
+
+elMesaPorta.addEventListener('change', () => {
+  enviar({ type: 'midi:usar', porta: elMesaPorta.value });
+});
+
 document.getElementById('btnAjustes').addEventListener('click', () => {
   desenharListaAjustes();
+  desenharEstadoDaMesa();
+  enviar({ type: 'midi:portas' });
   elAjustes.showModal();
 });
 
