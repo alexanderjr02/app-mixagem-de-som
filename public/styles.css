@@ -660,6 +660,24 @@ select.painel__campo {
 /* background-color, e nao background: o atalho apagaria a seta do select. */
 .bloco .painel__campo { background-color: var(--superficie); }
 
+.bloco__opcao {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 14px;
+  color: var(--texto-2);
+  cursor: pointer;
+}
+
+.bloco__opcao input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--texto);
+}
+
 /* ---------------------- lista de controles (ajustes) --------------------- */
 
 .lista {

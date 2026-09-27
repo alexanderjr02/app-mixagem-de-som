@@ -115,6 +115,22 @@ function ehAutomatico(spec) {
   return spec === null || spec === undefined || spec === '' || spec === 'auto';
 }
 
+/**
+ * true se a porta com esse nome ainda aparece na lista do sistema. Usa o
+ * proprio objeto da porta aberta para listar, sem criar outro objeto nativo a
+ * cada verificacao (no Pi isso gastaria clientes do ALSA).
+ */
+function aindaNaLista(porta, nome) {
+  try {
+    for (let i = 0; i < porta.getPortCount(); i++) {
+      if (porta.getPortName(i) === nome) return true;
+    }
+  } catch {
+    // Se nem listar funciona, a porta tambem nao presta mais.
+  }
+  return false;
+}
+
 /** Objeto de saida que so escreve no terminal, usado no modo simulado. */
 function saidaSimulada(motivo) {
   let ultimo = 0;
@@ -122,6 +138,7 @@ function saidaSimulada(motivo) {
     nome: 'simulado',
     simulado: true,
     motivo,
+    sumiu: () => false,
     enviar(bytes) {
       // Sem isso, arrastar um fader enche o terminal de linhas iguais.
       const agora = Date.now();
@@ -150,7 +167,7 @@ function abrirSaida(spec) {
   try {
     if (spec === 'virtual') {
       porta.openVirtualPort('Monitor 01V96');
-      return portaSaidaReal(porta, 'virtual: Monitor 01V96');
+      return portaSaidaReal(porta, 'virtual: Monitor 01V96', true);
     }
 
     const nomes = [];
@@ -175,16 +192,25 @@ function abrirSaida(spec) {
   }
 }
 
-function portaSaidaReal(porta, nome) {
+/**
+ * A mesa desligada ou o cabo solto deixam a porta aberta "morta": o nome some
+ * da lista do sistema, ou o envio passa a falhar (quando o cabo sai e volta
+ * rapido, o nome continua la mas o canal antigo nao serve mais). sumiu() conta
+ * isso para o bridge, que fecha e procura a mesa de novo.
+ */
+function portaSaidaReal(porta, nome, virtual = false) {
+  let falhou = false;
   return {
     nome,
     simulado: false,
     motivo: null,
+    sumiu: () => !virtual && (falhou || !aindaNaLista(porta, nome)),
     enviar(bytes) {
       try {
         porta.sendMessage(bytes);
       } catch (erro) {
-        console.error('[midi] erro ao enviar:', erro.message);
+        if (!falhou) console.error('[midi] erro ao enviar:', erro.message);
+        falhou = true;
       }
     },
     fechar() {
@@ -199,7 +225,7 @@ function portaSaidaReal(porta, nome) {
  * aoReceber recebe um array de bytes de cada mensagem SysEx.
  */
 function abrirEntrada(spec, aoReceber) {
-  const vazia = (motivo) => ({ nome: 'simulado', simulado: true, motivo, fechar() {} });
+  const vazia = (motivo) => ({ nome: 'simulado', simulado: true, motivo, sumiu: () => false, fechar() {} });
 
   if (!midi) return vazia('pacote MIDI nao instalado: ' + mensagemErroMidi());
   if (spec === 'simulado') return vazia('modo simulado pedido no config.json');
@@ -221,7 +247,7 @@ function abrirEntrada(spec, aoReceber) {
     if (spec === 'virtual') {
       porta.openVirtualPort('Monitor 01V96 IN');
       porta.ignoreTypes(false, true, true); // false = NAO ignorar SysEx
-      return portaEntradaReal(porta, 'virtual: Monitor 01V96 IN');
+      return portaEntradaReal(porta, 'virtual: Monitor 01V96 IN', true);
     }
 
     const nomes = [];
@@ -247,11 +273,12 @@ function abrirEntrada(spec, aoReceber) {
   }
 }
 
-function portaEntradaReal(porta, nome) {
+function portaEntradaReal(porta, nome, virtual = false) {
   return {
     nome,
     simulado: false,
     motivo: null,
+    sumiu: () => !virtual && !aindaNaLista(porta, nome),
     fechar() {
       try { porta.closePort(); } catch { /* ignora */ }
     }
@@ -263,6 +290,7 @@ module.exports = {
   mensagemErroMidi,
   listarPortas,
   escolherAutomatica,
+  aindaNaLista,
   abrirSaida,
   abrirEntrada
 };

@@ -3,6 +3,7 @@ config.json
 config.json.bak
 estado.json
 *.log
+.ai-company/
 
 # wrangler files
 .wrangler

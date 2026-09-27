@@ -139,11 +139,25 @@ function contarMidi(inicial) {
 contarMidi(true);
 
 /**
- * A maquina costuma ligar antes da mesa (ou o cabo USB e trocado de lugar).
- * Em vez de exigir reiniciar o programa, ele fica espiando de dez em dez
- * segundos ate a mesa aparecer, e avisa os celulares quando achar.
+ * A maquina costuma ligar antes da mesa, e o PC da mesa fica ligado direto
+ * enquanto a mesa e desligada depois do culto. Em vez de exigir reiniciar o
+ * programa, ele confere de dez em dez segundos: se a mesa sumiu, larga a porta
+ * morta; se a mesa apareceu, conecta. E avisa os celulares nos dois casos.
  */
 function procurarMesa() {
+  if (saidaMidi.sumiu() || entradaMidi.sumiu()) {
+    // Entrada e saida sao o mesmo cabo: se uma morreu, as duas sao reabertas.
+    console.warn('[midi] a mesa sumiu (desligada ou cabo solto), procurando de novo');
+    try { saidaMidi.fechar(); } catch { /* ignora */ }
+    try { entradaMidi.fechar(); } catch { /* ignora */ }
+    saidaMidi = abrirSaida(cfg.midi.saida);
+    entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+    contarMidi(false);
+    transmitirStatus();
+    if (!saidaMidi.simulado) reaplicarMix();
+    return;
+  }
+
   if (!saidaMidi.simulado && !entradaMidi.simulado) return;
 
   let mudou = false;
@@ -171,14 +185,16 @@ function procurarMesa() {
   console.log('[midi] mesa encontrada');
   contarMidi(false);
   transmitirStatus();
-
-  // Com a mesa de volta, o mix que esta na tela vale mais que o da mesa.
-  if (cfg.aplicarEstadoAoIniciar) {
-    for (const c of controles) if (mesa.estaCalibrado(c)) agendarEnvio(c.id);
-  }
+  reaplicarMix();
 }
 
-setInterval(procurarMesa, 10000).unref();
+/** Com a mesa de volta, o mix que esta na tela vale mais que o da mesa. */
+function reaplicarMix() {
+  if (!cfg.aplicarEstadoAoIniciar) return;
+  for (const c of controles) if (mesa.estaCalibrado(c)) agendarEnvio(c.id);
+}
+
+setInterval(procurarMesa, cfg.midi.intervaloProcuraMs || 10000).unref();
 
 /**
  * Fila de envio. Arrastar um fader gera dezenas de eventos por segundo; em vez
@@ -389,6 +405,7 @@ function anunciarControles() {
 function statusAtual() {
   return {
     type: 'status',
+    devolverMix: cfg.aplicarEstadoAoIniciar === true,
     midi: {
       simulado: saidaMidi.simulado,
       entradaSimulada: entradaMidi.simulado,
@@ -691,6 +708,23 @@ wss.on('connection', (cliente, req) => {
 
         console.log('[midi] porta escolhida pelo celular: ' + (escolha || 'automatica'));
         contarMidi(false);
+        transmitirStatus();
+        return;
+      }
+
+      // Devolver o mix quando a mesa liga, escolhido pelo celular, para
+      // ninguem precisar editar o config.json no PC da mesa.
+      case 'config:devolverMix': {
+        const ligado = msg.ligado === true;
+        try {
+          const atual = configArquivo.carregar();
+          atual.aplicarEstadoAoIniciar = ligado;
+          configArquivo.salvar(atual);
+        } catch (erro) {
+          enviarPara(cliente, { type: 'learn:erro', message: 'Nao consegui salvar: ' + erro.message });
+          return;
+        }
+        cfg.aplicarEstadoAoIniciar = ligado;
         transmitirStatus();
         return;
       }

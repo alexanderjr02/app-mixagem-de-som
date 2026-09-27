@@ -13,14 +13,19 @@ const fs = require('fs');
 const path = require('path');
 
 const RAIZ = path.resolve(__dirname, '..');
-const CAMINHO_CONFIG = path.join(RAIZ, 'config.json');
+
+// Onde ficam a calibracao e o ultimo mix. Normalmente e a pasta do programa.
+// MONITOR_DADOS existe para os testes: sem ele, rodar "npm test" no Pi
+// sobrescreveria a calibracao de verdade.
+const DADOS = process.env.MONITOR_DADOS ? path.resolve(process.env.MONITOR_DADOS) : RAIZ;
+const CAMINHO_CONFIG = path.join(DADOS, 'config.json');
 const CAMINHO_EXEMPLO = path.join(RAIZ, 'config.example.json');
-const CAMINHO_ESTADO = path.join(RAIZ, 'estado.json');
+const CAMINHO_ESTADO = path.join(DADOS, 'estado.json');
 
 // Valores usados quando a chave nao existe no arquivo.
 const PADRAO = {
   servidor: { porta: 8080, host: '0.0.0.0' },
-  midi: { entrada: null, saida: null, intervaloEnvioMs: 25, janelaEcoMs: 400 },
+  midi: { entrada: null, saida: null, intervaloEnvioMs: 25, janelaEcoMs: 400, intervaloProcuraMs: 10000 },
   aplicarEstadoAoIniciar: false,
   controles: []
 };
@@ -40,7 +45,7 @@ function comPadroes(cfg) {
 function carregar() {
   if (!fs.existsSync(CAMINHO_CONFIG)) {
     if (!fs.existsSync(CAMINHO_EXEMPLO)) {
-      throw new Error('Nao achei config.json nem config.example.json em ' + RAIZ);
+      throw new Error('Nao achei config.json em ' + DADOS + ' nem config.example.json em ' + RAIZ);
     }
     fs.copyFileSync(CAMINHO_EXEMPLO, CAMINHO_CONFIG);
     console.log('[config] config.json criado a partir do config.example.json');

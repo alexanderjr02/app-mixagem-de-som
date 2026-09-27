@@ -325,6 +325,7 @@ function conectar() {
         break;
       case 'status':
         statusMidi = msg.midi || null;
+        elDevolverMix.checked = msg.devolverMix === true;
         atualizarRodape();
         desenharEstadoDaMesa();
         break;
@@ -464,6 +465,13 @@ function desenharPortasDaMesa(msg) {
 
 elMesaPorta.addEventListener('change', () => {
   enviar({ type: 'midi:usar', porta: elMesaPorta.value });
+});
+
+// Fica no celular para ninguem precisar editar o config.json no PC da mesa.
+const elDevolverMix = document.getElementById('devolverMix');
+
+elDevolverMix.addEventListener('change', () => {
+  enviar({ type: 'config:devolverMix', ligado: elDevolverMix.checked });
 });
 
 const elBtnAjustes = document.getElementById('btnAjustes');

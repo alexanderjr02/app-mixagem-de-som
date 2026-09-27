@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
+    "test": "node --test",
     "learn": "node src/learn.js",
     "monitor": "node src/monitor.js",
     "portas": "node src/portas.js",

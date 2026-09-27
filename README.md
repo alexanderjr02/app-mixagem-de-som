@@ -97,6 +97,10 @@ Duas coisas que evitam dor de cabeça no dia:
 
 - Se a mesa só for ligada **depois** da máquina, ele fica procurando de dez em
   dez segundos e avisa o celular quando achar. Não precisa reiniciar nada.
+- O mesmo vale com a máquina ligada direto: se a mesa for desligada depois do
+  culto, ou o cabo USB sair e voltar, ele percebe em até dez segundos, avisa o
+  celular e reconecta sozinho quando a mesa volta. Com **"Quando a mesa ligar,
+  devolver o meu mix"** ligado no app, ele ainda devolve o seu mix para a mesa.
 - Se houver mais de um aparelho MIDI e ele ficar em dúvida, ele **não chuta**:
   abre o app, toque no botão de ajustes e escolha a porta na lista, ali mesmo
   no celular.
@@ -147,8 +151,9 @@ Enquanto um controle não estiver calibrado, o bridge **nunca** envia MIDI dele.
 - **Volume geral**: a coluna da direita, sempre visível.
 - Dois celulares abertos ficam sincronizados. Se alguém mexer no send direto na
   mesa, o app acompanha.
-- O último mix fica salvo. Para que ele seja reaplicado na mesa quando a
-  máquina ligar, coloque `"aplicarEstadoAoIniciar": true` no `config.json`.
+- O último mix fica salvo. Para que ele seja reaplicado na mesa quando ela ou
+  a máquina ligar, abra os ajustes e ligue **"Quando a mesa ligar, devolver o
+  meu mix"**. Não precisa mexer em arquivo no PC da mesa.
 
 ### Deixar pronto para o próximo culto
 
@@ -185,6 +190,7 @@ conectada, o bridge avisa no rodapé que nada está saindo.
 | `npm run monitor` | mostra em hexadecimal tudo que a mesa manda |
 | `npm run learn` | a mesma calibração, pelo terminal |
 | `npm run simular` | finge ser a mesa, para testar sem hardware |
+| `npm test` | roda os testes automáticos. Não manda nada para a mesa nem mexe na sua calibração: usa MIDI simulado e uma pasta temporária |
 
 ## config.json
 
@@ -210,7 +216,8 @@ calibração pelo celular escreve aqui.
 | `midi.entrada` / `midi.saida` | Vazio (`null`) faz ele procurar a mesa sozinho, que é o normal. Aceita índice (`1`) ou parte do nome (`"01V96"`). Dá para escolher pelo app, sem editar isto |
 | `midi.intervaloEnvioMs` | De quanto em quanto tempo o lote de mudanças vai para a mesa |
 | `midi.janelaEcoMs` | Tempo em que o bridge ignora o que a mesa devolve logo depois de um envio, para o fader não tremer na mão |
-| `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar |
+| `midi.intervaloProcuraMs` | De quanto em quanto tempo ele confere se a mesa sumiu ou apareceu no cabo (padrão 10000, dez segundos) |
+| `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar. É o que o botão "devolver o meu mix" do app liga e desliga |
 
 Cada controle calibrado fica assim:
 
@@ -245,13 +252,14 @@ Celular para o bridge:
 { "type": "learn:capturar", "step": "min" }
 { "type": "learn:salvar" }
 { "type": "controle:remover", "control": "bumbo" }
+{ "type": "config:devolverMix", "ligado": true }
 ```
 
 Bridge para o celular:
 
 ```json
 { "type": "controls", "controls": [ { "id": "bumbo", "label": "Bumbo", "type": "canal", "calibrated": true } ] }
-{ "type": "status",   "midi": { "simulado": false, "saida": "01V96" } }
+{ "type": "status",   "devolverMix": false, "midi": { "simulado": false, "saida": "01V96" } }
 { "type": "state",    "values": { "bumbo": 0.72 }, "mutes": { "bumbo": false } }
 { "type": "learn:midi", "count": 42, "hex": "F0 43 ..." }
 { "type": "learn:salvo", "control": { }, "faixa": { }, "bytes": { }, "avisos": [ ] }
