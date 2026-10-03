@@ -11,3 +11,9 @@ estado.json
 !.dev.vars.example
 .env*
 !.env.example
+
+atualizacao.json
+atualizacao.lock
+.atualizacao/
+.anterior/
+Monitor01V96-atualizar.vbs

@@ -47,7 +47,13 @@ seja **a máquina ligada na mesa** e que ela fique ligada.
 Abra o PowerShell e cole:
 
 ```powershell
-irm https://raw.githubusercontent.com/alexanderjr02/app-mixagem-de-som/main/instalar/windows.ps1 | iex
+irm https://raw.githubusercontent.com/alexanderjr02/app-mixagem-de-som/igreja/instalar/windows.ps1 | iex
+```
+
+No CMD (como administrador), o mesmo comando assim:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/alexanderjr02/app-mixagem-de-som/igreja/instalar/windows.ps1 | iex"
 ```
 
 Ele instala o Node.js se faltar, baixa o programa, configura para abrir sozinho
@@ -195,6 +201,38 @@ muda: a calibração e o volume no seu fone continuam iguais.
    `monitor.local` já resolve isso sozinho.
 
 Aí é só chegar, entrar no Wi-Fi e abrir o ícone.
+
+---
+
+## Atualização automática
+
+No PC com Windows da mesa, o programa se atualiza sozinho. Você não precisa
+abrir terminal nem rodar o instalador de novo.
+
+- **O que faz:** a cada 30 minutos uma tarefa do Windows confere se o programa
+  está no ar (e liga de novo se tiver caído). No máximo de 6 em 6 horas ela
+  pergunta ao GitHub se existe versão nova no ramo `igreja` (o que o dono
+  aprovou; o `main` não chega lá). Se existir, e só com a mesa desligada,
+  baixa, instala e **roda os testes** antes de trocar qualquer coisa. Se algum teste falhar,
+  essa versão é descartada e a atual continua.
+- **Sem internet:** falta de internet (ou o GitHub fora do ar) nunca faz o
+  programa recusar uma versão. Ele só espera um pouco (30 min, depois 1 h, 2 h,
+  até 6 h) e tenta de novo. Só é recusada a versão que realmente está ruim:
+  testes que falham, pacote estranho, ou uma que não sobe ou cai de novo logo
+  depois de instalada.
+- **Quando troca:** só com a **mesa desligada e nenhum celular conectado**.
+  Se alguém estiver usando, ela espera e troca depois, nunca no meio do culto.
+  Cada versão fica na própria pasta (`versoes\<código>`) e a anterior é
+  guardada inteira; se a nova não subir, volta sozinha para ela. Sua calibração
+  (`config.json`) e o mix salvo (`estado.json`) nunca são mexidos.
+- **Ver a versão:** no app, ajustes, **Copiar diagnóstico**. A linha
+  "versão" mostra a versão instalada e o resultado da última checagem.
+- **Onde fica o log:** `atualizacao.log`, na pasta de dados
+  (`%LOCALAPPDATA%\Monitor01V96`). Guarda as últimas 300 linhas.
+- **Desligar:** abra o **Agendador de Tarefas** do Windows e apague a tarefa
+  **Monitor 01V96**. O programa continua funcionando, só deixa de se atualizar
+  (e de ser religado sozinho se cair; ele continua abrindo quando o Windows
+  liga). Rodar o instalador de novo recria a tarefa.
 
 ---
 

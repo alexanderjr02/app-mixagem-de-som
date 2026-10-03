@@ -103,3 +103,24 @@ test('idUnico numera nomes repetidos e preserva o id ao recalibrar', () => {
   assert.equal(config.idUnico('Bumbo', [{ id: 'bumbo' }, { id: 'bumbo-2' }]), 'bumbo-3');
   assert.equal(config.idUnico('Bumbo', [{ id: 'bumbo' }], 'bumbo'), 'bumbo');
 });
+
+test('config.json e estado.json que comecam com BOM (EF BB BF) sao lidos normalmente', () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const cfgJson = { servidor: { porta: 9191 }, controles: [{ id: 'voz', rotulo: 'Voz', tipo: 'canal', calibrado: false }] };
+  fs.writeFileSync(config.CAMINHO_CONFIG, Buffer.concat([bom, Buffer.from(JSON.stringify(cfgJson))]));
+  assert.equal(config.carregar().servidor.porta, 9191);
+
+  fs.writeFileSync(config.CAMINHO_ESTADO, Buffer.concat([bom, Buffer.from('{"valores":{"voz":0.5},"mutes":{}}')]));
+  assert.deepEqual(config.carregarEstado().valores, { voz: 0.5 });
+});
+
+test('salvar e salvarEstado gravam por arquivo temporario: nunca deixam .tmp nem arquivo pela metade', () => {
+  escreverConfig({ controles: [] });
+  const cfg = config.carregar();
+  cfg.servidor.porta = 8123;
+  config.salvar(cfg);
+  config.salvarEstado({ valores: { a: 1 }, mutes: {} });
+  assert.deepEqual(fs.readdirSync(PASTA).filter((n) => n.endsWith('.tmp')), []);
+  assert.equal(JSON.parse(fs.readFileSync(config.CAMINHO_CONFIG, 'utf8')).servidor.porta, 8123);
+  assert.deepEqual(config.carregarEstado().valores, { a: 1 });
+});

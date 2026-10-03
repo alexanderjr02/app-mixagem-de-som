@@ -889,6 +889,9 @@ elBtnDiagnostico.addEventListener('click', async () => {
       'portas MIDI vistas: ' + ((dados.midi.portasVistas || []).join(' | ') || 'nenhuma'),
       'controles: ' + dados.controles + ', sem calibrar: ' + (dados.naoCalibrados.join(', ') || 'nenhum'),
       'celulares conectados: ' + dados.clientes,
+      'versão: ' + ((dados.versao && dados.versao.sha) || 'desconhecida') +
+        ((dados.versao && dados.versao.instaladaEm) ? ' (instalada em ' + dados.versao.instaladaEm.slice(0, 10) + ')' : '') +
+        ', atualização: ' + ((dados.versao && dados.versao.ultimoResultado) || 'sem registro'),
       'celular: ' + navigator.userAgent,
       '',
       'últimos avisos do programa:',

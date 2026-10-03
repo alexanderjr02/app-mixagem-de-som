@@ -22,6 +22,22 @@ const CAMINHO_CONFIG = path.join(DADOS, 'config.json');
 const CAMINHO_EXEMPLO = path.join(RAIZ, 'config.example.json');
 const CAMINHO_ESTADO = path.join(DADOS, 'estado.json');
 
+/** Le um JSON do disco. Tira o BOM (U+FEFF) que o PowerShell 5 costuma gravar. */
+function lerJson(arquivo) {
+  const texto = fs.readFileSync(arquivo, 'utf8');
+  return JSON.parse(texto.charCodeAt(0) === 0xfeff ? texto.slice(1) : texto);
+}
+
+/**
+ * Grava por arquivo temporario + rename: um kill no meio (queda de luz,
+ * atualizacao) nunca deixa o arquivo pela metade.
+ */
+function gravarAtomico(arquivo, texto) {
+  const tmp = arquivo + '.tmp';
+  fs.writeFileSync(tmp, texto, 'utf8');
+  fs.renameSync(tmp, arquivo);
+}
+
 // Valores usados quando a chave nao existe no arquivo.
 const PADRAO = {
   servidor: { porta: 8080, host: '0.0.0.0' },
@@ -61,7 +77,7 @@ function carregar() {
 
   let bruto;
   try {
-    bruto = JSON.parse(fs.readFileSync(CAMINHO_CONFIG, 'utf8'));
+    bruto = lerJson(CAMINHO_CONFIG);
   } catch (erro) {
     throw new Error('config.json tem erro de sintaxe JSON: ' + erro.message);
   }
@@ -88,13 +104,13 @@ function salvar(cfg) {
   if (fs.existsSync(CAMINHO_CONFIG)) {
     fs.copyFileSync(CAMINHO_CONFIG, CAMINHO_CONFIG + '.bak');
   }
-  fs.writeFileSync(CAMINHO_CONFIG, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+  gravarAtomico(CAMINHO_CONFIG, JSON.stringify(cfg, null, 2) + '\n');
 }
 
 /** Le o ultimo mix salvo. Nunca quebra: se der erro, volta vazio. */
 function carregarEstado() {
   try {
-    const dados = JSON.parse(fs.readFileSync(CAMINHO_ESTADO, 'utf8'));
+    const dados = lerJson(CAMINHO_ESTADO);
     return {
       valores: dados.valores && typeof dados.valores === 'object' ? dados.valores : {},
       mutes: dados.mutes && typeof dados.mutes === 'object' ? dados.mutes : {}
@@ -107,7 +123,7 @@ function carregarEstado() {
 /** Grava o mix atual. Erro aqui nao pode derrubar o bridge. */
 function salvarEstado(estado) {
   try {
-    fs.writeFileSync(CAMINHO_ESTADO, JSON.stringify(estado, null, 2) + '\n', 'utf8');
+    gravarAtomico(CAMINHO_ESTADO, JSON.stringify(estado, null, 2) + '\n');
   } catch (erro) {
     console.warn('[config] nao consegui salvar estado.json:', erro.message);
   }
@@ -139,6 +155,8 @@ function idUnico(rotulo, controles, idAtual) {
 
 module.exports = {
   RAIZ,
+  DADOS,
+  lerJson,
   CAMINHO_CONFIG,
   gerarId,
   idUnico,

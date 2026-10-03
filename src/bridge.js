@@ -38,6 +38,24 @@ const mesa = require('./yamaha01v96');
 const DIR_PUBLIC = path.join(configArquivo.RAIZ, 'public');
 
 /**
+ * Versao instalada, gravada pelo instalador e pela atualizacao automatica em
+ * atualizacao.json (na pasta de dados). Sem o arquivo, tudo vem nulo.
+ */
+function lerVersao() {
+  try {
+    const j = configArquivo.lerJson(path.join(configArquivo.DADOS, 'atualizacao.json'));
+    const sha = typeof j.atual === 'string' && /^[0-9a-f]{40}$/.test(j.atual) ? j.atual.slice(0, 7) : null;
+    return {
+      sha,
+      instaladaEm: typeof j.instaladaEm === 'string' ? j.instaladaEm.slice(0, 40) : null,
+      ultimoResultado: typeof j.ultimoResultado === 'string' ? j.ultimoResultado.slice(0, 120) : null
+    };
+  } catch {
+    return { sha: null, instaladaEm: null, ultimoResultado: null };
+  }
+}
+
+/**
  * Ultimos avisos, guardados para o botao "copiar diagnostico" do app.
  * Quando algo dá errado no meio do culto, ninguem vai abrir terminal: da para
  * copiar isso pelo celular e mandar para quem for ajudar.
@@ -793,6 +811,7 @@ const servidor = http.createServer((req, res) => {
   if (caminhoUrl === '/api/status') {
     const portas = listarPortas();
     responderJson(res, {
+      versao: lerVersao(),
       midi: {
         saida: saidaMidi.nome,
         entrada: entradaMidi.nome,
