@@ -91,6 +91,49 @@
 
         <ul class="lista" id="listaControles"></ul>
 
+        <!-- Com um canal calibrado no formato do manual, ele vira o molde dos
+             outros. Sem ele, o bloco fica compacto e só diz o que falta. -->
+        <section class="bloco" id="blocoGerar">
+          <h3 class="bloco__titulo">Criar os outros canais</h3>
+          <p class="bloco__texto" id="gerarExplica"></p>
+
+          <div class="bloco__grupo" id="gerarConteudo" hidden>
+            <div class="grade" id="gerarGrade" role="group" aria-label="Canais da mesa"></div>
+
+            <p class="grade__legenda">
+              <span class="grade__existe">já está no seu monitor</span>
+              <span id="gerarContagem">nenhum marcado</span>
+            </p>
+
+            <div class="bloco__atalhos" id="gerarAtalhos">
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-16">1 a 16</button>
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="17-32">17 a 32</button>
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="limpar">Limpar</button>
+            </div>
+
+            <div class="medidor" id="gerarProgresso" hidden>
+              <span class="medidor__texto medidor__texto--ativo" id="gerarProgressoTexto" aria-live="polite">conferindo com a mesa</span>
+              <span class="medidor__barra" id="gerarBarraTrilho" role="progressbar"
+                    aria-label="Conferência com a mesa" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><span id="gerarBarra"></span></span>
+              <span class="medidor__detalhe" id="gerarUltimo"></span>
+            </div>
+
+            <div class="bloco__retorno" aria-live="polite">
+              <p class="bloco__estado" id="gerarResumo" hidden></p>
+              <p class="painel__erro" id="gerarErro" hidden></p>
+            </div>
+
+            <p class="bloco__estado bloco__estado--alerta" id="gerarMotivo" hidden></p>
+            <button class="botao botao--largo" id="btnGerar" type="button" disabled aria-describedby="gerarMotivo">
+              Conferir com a mesa e criar
+            </button>
+            <p class="painel__ajuda">
+              Os novos aparecem como "Canal 5", "Canal 6" e assim por diante.
+              Toque no nome na lista para renomear.
+            </p>
+          </div>
+        </section>
+
         <button class="botao botao--fantasma botao--largo" id="btnDiagnostico" type="button">
           Copiar diagnóstico
         </button>

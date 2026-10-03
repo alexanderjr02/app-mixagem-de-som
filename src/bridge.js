@@ -7,12 +7,16 @@
  *   1. serve o app (pasta public/) por HTTP, para o celular abrir no navegador
  *   2. mantem um WebSocket com cada celular conectado, para resposta imediata
  *   3. traduz cada movimento de fader em uma mensagem SysEx para a 01V96
- *   4. conduz a calibracao pedida pelo celular, sem precisar de terminal
+ *   4. conduz a calibracao pedida pelo celular, sem precisar de terminal,
+ *      e cria os outros canais a partir de um calibrado, conferindo cada um
+ *      com a mesa
  *
  * Seguranca de audio: o bridge so envia SysEx de controles marcados como
  * "calibrado": true no config.json. Enquanto voce nao calibrar, mexer nos
  * faders so muda a tela, nunca a mesa. Assim nao tem risco de mandar um
- * endereco chutado e bagunçar a mixagem da igreja.
+ * endereco chutado e bagunçar a mixagem da igreja. Ao criar canais, o que
+ * vai para a mesa e so pedido de leitura (Parameter request), que nao muda
+ * o som; o canal so vira controle se a mesa responder.
  */
 
 const http = require('http');
@@ -148,6 +152,7 @@ function procurarMesa() {
   if (saidaMidi.sumiu() || entradaMidi.sumiu()) {
     // Entrada e saida sao o mesmo cabo: se uma morreu, as duas sao reabertas.
     console.warn('[midi] a mesa sumiu (desligada ou cabo solto), procurando de novo');
+    interromperGeracao('a mesa sumiu no meio');
     try { saidaMidi.fechar(); } catch { /* ignora */ }
     try { entradaMidi.fechar(); } catch { /* ignora */ }
     saidaMidi = abrirSaida(cfg.midi.saida);
@@ -240,6 +245,16 @@ setInterval(despacharFila, Math.max(5, cfg.midi.intervaloEnvioMs || 25)).unref()
  * acompanha em vez de mostrar valor errado.
  */
 function aoReceberDaMesa(bytes) {
+  // Resposta ao pedido de leitura da criacao de canais: e so dela.
+  const pendente = geracao && geracao.pendente;
+  if (pendente) {
+    const raw = mesa.lerValorDoFrame(pendente.candidato, bytes);
+    if (raw !== null) {
+      pendente.responder(raw);
+      return;
+    }
+  }
+
   if (sessoes.size) {
     for (const [cliente, sessao] of sessoes) alimentarSessao(cliente, sessao, bytes);
     return;
@@ -297,6 +312,16 @@ function alimentarSessao(cliente, sessao, bytes) {
 }
 
 function iniciarSessao(cliente, msg) {
+  // Nao calibra enquanto cria canais (veja iniciarGeracao). "etapa" faz o app
+  // voltar o assistente para o nome em vez de ficar esperando captura.
+  if (geracao) {
+    enviarPara(cliente, {
+      type: 'learn:erro',
+      message: 'Estou criando canais agora. Espere terminar para calibrar.',
+      etapa: 'nome'
+    });
+    return;
+  }
   sessoes.set(cliente, {
     idAtual: typeof msg.control === 'string' ? msg.control : null,
     rotulo: String(msg.label || '').trim().slice(0, 40),
@@ -421,6 +446,261 @@ function transmitirStatus() {
 }
 
 // ---------------------------------------------------------------------------
+// Criar os outros canais a partir de um canal calibrado
+// ---------------------------------------------------------------------------
+
+/**
+ * Pelo formato do manual, o send do canal 5 tem o mesmo molde do canal 1, so
+ * com outro byte de canal. Mas o programa nao confia nisso as cegas: para cada
+ * canal ele manda um Parameter request (pedido de leitura, que nao mexe no
+ * som) e so cria o controle se a mesa responder naquele endereco. O valor que
+ * ela responde vira o valor inicial do fader. Uma geracao por vez, um pedido
+ * por vez.
+ */
+let geracao = null;
+
+function esperaResposta() {
+  const ms = Number(cfg.midi.esperaRespostaMs);
+  return Number.isFinite(ms) && ms > 0 ? Math.min(5000, Math.max(20, ms)) : 300;
+}
+
+/** A mesa em que a geracao comecou saiu do ar (porta trocada, simulada ou morta)? */
+function mesaSaiuDoAr(g) {
+  return (
+    saidaMidi !== g.saida ||
+    entradaMidi !== g.entrada ||
+    saidaMidi.simulado ||
+    entradaMidi.simulado ||
+    saidaMidi.sumiu() ||
+    entradaMidi.sumiu()
+  );
+}
+
+function interromperGeracao(motivo) {
+  if (!geracao || geracao.interrompido) return;
+  geracao.interrompido = true;
+  console.warn('[gerar] interrompido: ' + motivo);
+  if (geracao.pendente) geracao.pendente.responder(null);
+}
+
+/** Algum controle da lista ja aponta para o endereco desse candidato? */
+function enderecoJaExiste(lista, candidato) {
+  const canal = mesa.canalDoControle(candidato);
+  return lista.some(
+    (c) =>
+      mesa.mesmoEndereco(c, candidato) ||
+      // Calibrado a mao com a janela do valor um pouco diferente: pelo manual,
+      // mesmo cabecalho (F0 43 1n 3E 0D tt ee pp) e mesmo canal e o mesmo parametro.
+      (canal !== null &&
+        mesa.canalDoControle(c) === canal &&
+        c.template.slice(0, 8).every((b, i) => b === candidato.template[i]))
+  );
+}
+
+/** Espera a mesa responder o pedido. Registrada antes do envio: a resposta pode ser rapida. */
+function esperarResposta(g, candidato) {
+  return new Promise((ok) => {
+    const timer = setTimeout(() => terminar(null), esperaResposta());
+    function terminar(raw) {
+      clearTimeout(timer);
+      if (g.pendente === pendente) g.pendente = null;
+      ok(raw);
+    }
+    const pendente = { candidato, responder: terminar };
+    g.pendente = pendente;
+  });
+}
+
+function recusarGeracao(cliente, message) {
+  enviarPara(cliente, { type: 'gerar:erro', message });
+}
+
+function iniciarGeracao(cliente, msg) {
+  if (geracao) {
+    return recusarGeracao(cliente, 'Ja estou criando canais agora. Espere terminar e tente de novo.');
+  }
+  // Calibrar e criar canais nunca rodam juntos: uma resposta atrasada da mesa
+  // cairia na calibracao e o controle ficaria com o endereco de outro canal.
+  if (sessoes.size) {
+    return recusarGeracao(cliente, 'Alguem esta calibrando um controle agora. Espere terminar e tente de novo.');
+  }
+
+  const original = porId.get(msg.base);
+  if (!original) {
+    return recusarGeracao(cliente, 'Nao achei esse controle. Atualize a tela e escolha de novo.');
+  }
+  if (!mesa.estaCalibrado(original)) {
+    return recusarGeracao(cliente, 'Calibre este canal antes: ele e o modelo para os outros.');
+  }
+  if ((original.tipo || 'canal') !== 'canal') {
+    return recusarGeracao(cliente, 'So da para criar canais a partir de um canal, nao de reverb nem do volume geral.');
+  }
+  const canalBase = mesa.canalDoControle(original);
+  if (canalBase === null) {
+    return recusarGeracao(cliente, 'Este controle nao esta no formato do manual da 01V96, calibre os canais um a um.');
+  }
+  if (saidaMidi.simulado || entradaMidi.simulado) {
+    return recusarGeracao(cliente, 'Ligue a mesa no cabo USB: preciso que ela responda para conferir cada canal.');
+  }
+
+  const pedidos = msg.canais;
+  if (
+    !Array.isArray(pedidos) ||
+    pedidos.length > mesa.TOTAL_CANAIS ||
+    pedidos.some((n) => !Number.isInteger(n) || n < 1 || n > mesa.TOTAL_CANAIS)
+  ) {
+    return recusarGeracao(cliente, 'Escolha canais de 1 a ' + mesa.TOTAL_CANAIS + '.');
+  }
+  const canais = [...new Set(pedidos)].sort((a, b) => a - b);
+  if (!canais.length) return recusarGeracao(cliente, 'Marque pelo menos um canal.');
+
+  const base = { ...original, template: original.template.slice() };
+  const jaExistiam = [];
+  const fila = [];
+  for (const canal of canais) {
+    if (canal === canalBase || enderecoJaExiste(controles, mesa.controleParaCanal(base, canal))) {
+      jaExistiam.push(canal);
+    } else {
+      fila.push(canal);
+    }
+  }
+
+  const g = {
+    cliente,
+    base,
+    fila,
+    jaExistiam,
+    confirmados: [],
+    semResposta: [],
+    feitos: 0,
+    interrompido: false,
+    concluida: false,
+    pendente: null,
+    saida: saidaMidi,
+    entrada: entradaMidi
+  };
+  geracao = g;
+  console.log('[gerar] a partir de "' + (base.rotulo || base.id) + '" (canal ' + canalBase + '): ' +
+    fila.length + ' canal(is) para conferir com a mesa, ' + jaExistiam.length + ' ja existiam');
+
+  rodarGeracao(g).catch((erro) => {
+    // Erro no meio: salva o que a mesa ja confirmou, como numa interrupcao.
+    console.error('[gerar] erro inesperado: ' + erro.message);
+    g.interrompido = true;
+    if (g.pendente) g.pendente.responder(null);
+    try {
+      if (g.concluida) throw erro; // o erro foi no proprio fim: nao grava duas vezes
+      concluirGeracao(g);
+    } catch (erroNoFim) {
+      console.error('[gerar] nao consegui terminar: ' + erroNoFim.message);
+      enviarPara(g.cliente, { type: 'gerar:erro', message: 'Algo deu errado ao criar os canais: ' + erroNoFim.message });
+    }
+  }).finally(() => {
+    if (geracao === g) geracao = null;
+  });
+}
+
+async function rodarGeracao(g) {
+  for (const canal of g.fila) {
+    if (g.interrompido) break;
+    if (mesaSaiuDoAr(g)) {
+      interromperGeracao('a mesa saiu do ar');
+      break;
+    }
+
+    const candidato = mesa.controleParaCanal(g.base, canal);
+    const resposta = esperarResposta(g, candidato);
+    // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
+    g.saida.enviar(mesa.montarPedido(g.base, canal));
+    const raw = await resposta;
+
+    if (g.interrompido) break;
+    if (raw === null && mesaSaiuDoAr(g)) {
+      interromperGeracao('a mesa saiu do ar');
+      break;
+    }
+
+    if (raw === null) g.semResposta.push(canal);
+    else g.confirmados.push({ canal, candidato, raw });
+    g.feitos++;
+
+    enviarPara(g.cliente, {
+      type: 'gerar:progresso',
+      canal,
+      feitos: g.feitos,
+      total: g.fila.length,
+      confirmado: raw !== null
+    });
+  }
+
+  concluirGeracao(g);
+}
+
+/** Grava o que a mesa confirmou, mesmo se parou no meio. */
+function concluirGeracao(g) {
+  g.concluida = true;
+  geracao = null;
+
+  const novos = [];
+  const jaNaLista = [];
+  if (g.confirmados.length) {
+    try {
+      gravarControles((lista) => {
+        for (const { canal, candidato, raw } of g.confirmados) {
+          // Alguem pode ter calibrado esse canal enquanto a mesa respondia.
+          if (enderecoJaExiste(lista, candidato)) {
+            jaNaLista.push(canal);
+            continue;
+          }
+          const rotulo = 'Canal ' + canal;
+          const controle = {
+            id: configArquivo.idUnico(rotulo, lista),
+            rotulo,
+            tipo: 'canal',
+            valorInicial: typeof g.base.valorInicial === 'number' ? g.base.valorInicial : 0.5,
+            ...candidato,
+            geradoDe: g.base.id
+          };
+          lista.push(controle);
+          novos.push({ controle, canal, raw });
+        }
+        return lista;
+      });
+    } catch (erro) {
+      console.error('[gerar] nao consegui salvar: ' + erro.message);
+      enviarPara(g.cliente, { type: 'gerar:erro', message: 'Nao consegui salvar os canais: ' + erro.message });
+      return;
+    }
+  }
+
+  // O app so espelha a mesa: o valor que ela respondeu vira o do fader, e
+  // nada e mandado de volta para ela.
+  const criados = [];
+  for (const { controle, canal, raw } of novos) {
+    estado.valores[controle.id] = mesa.escalarParaNormalizado(raw, controle.rawMin, controle.rawMax);
+    estado.mutes[controle.id] = false;
+    criados.push({ id: controle.id, label: controle.rotulo, canal });
+  }
+  if (criados.length) agendarSalvamento();
+
+  const jaExistiam = g.jaExistiam.concat(jaNaLista).sort((a, b) => a - b);
+  console.log('[gerar] ' + criados.length + ' criado(s), ' + g.semResposta.length + ' sem resposta, ' +
+    jaExistiam.length + ' ja existiam' + (g.interrompido ? ', interrompido' : ''));
+  if (!g.confirmados.length && g.semResposta.length) {
+    console.warn('[gerar] a mesa nao respondeu nenhum pedido: confira Parameter Change RX ligado e Rx CH igual ao Device ID');
+  }
+
+  enviarPara(g.cliente, {
+    type: 'gerar:fim',
+    criados,
+    semResposta: g.semResposta.slice(),
+    jaExistiam,
+    interrompido: g.interrompido
+  });
+  anunciarControles();
+}
+
+// ---------------------------------------------------------------------------
 // Servidor HTTP (o app em si)
 // ---------------------------------------------------------------------------
 
@@ -447,12 +727,18 @@ function responderJson(res, dados, status = 200) {
 }
 
 function listaParaApp() {
-  return controles.map((c) => ({
-    id: c.id,
-    label: c.rotulo || c.id,
-    type: c.tipo || 'canal',
-    calibrated: mesa.estaCalibrado(c)
-  }));
+  return controles.map((c) => {
+    const item = {
+      id: c.id,
+      label: c.rotulo || c.id,
+      type: c.tipo || 'canal',
+      calibrated: mesa.estaCalibrado(c)
+    };
+    // "canal" so aparece quando da para criar os outros a partir deste.
+    const canal = item.type === 'canal' ? mesa.canalDoControle(c) : null;
+    if (canal !== null) item.canal = canal;
+    return item;
+  });
 }
 
 const servidor = http.createServer((req, res) => {
@@ -668,10 +954,36 @@ wss.on('connection', (cliente, req) => {
           delete estado.mutes[msg.control];
           anunciarControles();
         } catch (erro) {
-          enviarPara(cliente, { type: 'learn:erro', message: erro.message });
+          // controle:erro aparece na tela; learn:erro so dentro do assistente.
+          enviarPara(cliente, { type: 'controle:erro', message: 'Nao consegui salvar: ' + erro.message });
         }
         return;
       }
+
+      // So o nome muda: id, calibracao e o valor no fone continuam iguais.
+      case 'controle:renomear': {
+        const rotulo = typeof msg.label === 'string' ? msg.label.trim().slice(0, 40).trim() : '';
+        if (!porId.has(msg.control)) {
+          enviarPara(cliente, { type: 'controle:erro', message: 'Nao achei esse controle. Atualize a tela.' });
+          return;
+        }
+        if (!rotulo) {
+          enviarPara(cliente, { type: 'controle:erro', message: 'Escreva um nome para o controle.' });
+          return;
+        }
+        try {
+          gravarControles((lista) => lista.map((c) => (c.id === msg.control ? { ...c, rotulo } : c)));
+        } catch (erro) {
+          enviarPara(cliente, { type: 'controle:erro', message: 'Nao consegui salvar: ' + erro.message });
+          return;
+        }
+        anunciarControles();
+        return;
+      }
+
+      case 'gerar:canais':
+        iniciarGeracao(cliente, msg);
+        return;
 
       // Escolher a porta da mesa pelo celular, para nunca precisar editar
       // arquivo na maquina do rack.
@@ -701,6 +1013,7 @@ wss.on('connection', (cliente, req) => {
         cfg.midi.saida = escolha;
         cfg.midi.entrada = escolha;
 
+        interromperGeracao('a porta da mesa foi trocada');
         try { saidaMidi.fechar(); } catch { /* ignora */ }
         try { entradaMidi.fechar(); } catch { /* ignora */ }
         saidaMidi = abrirSaida(cfg.midi.saida);
@@ -737,6 +1050,9 @@ wss.on('connection', (cliente, req) => {
 
   cliente.on('close', () => {
     sessoes.delete(cliente);
+    if (geracao && geracao.cliente === cliente) {
+      console.log('[gerar] o celular que pediu saiu; termino e salvo o que a mesa confirmar');
+    }
     console.log('[ws] celular saiu: ' + origem + ' (total: ' + wss.clients.size + ')');
   });
 

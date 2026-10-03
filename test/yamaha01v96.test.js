@@ -203,3 +203,96 @@ test('validarControle aponta config.json quebrado', () => {
 test('paraHex mostra os bytes do jeito do terminal', () => {
   assert.equal(mesa.paraHex([0xf0, 0x43, 0x0a, 0xf7]), 'F0 43 0A F7');
 });
+
+// ---------------------------------------------------------------------------
+// Criar os outros canais (formato do manual: F0 43 1n 3E 0D|7F tt ee pp cc dd.. F7)
+// ---------------------------------------------------------------------------
+
+/** O bumbo com outros bytes no template (o resto da calibracao igual). */
+function comTemplate(mudancas, extra = {}) {
+  const template = MINIMO.slice();
+  for (const [i, b] of Object.entries(mudancas)) template[i] = b;
+  return { ...bumbo(), template, ...extra };
+}
+
+test('canalDoControle le o byte cc do formato do manual (canal 1 = 0x00)', () => {
+  assert.equal(mesa.canalDoControle(bumbo()), 1);
+  assert.equal(mesa.canalDoControle(comTemplate({ 8: 0x04 })), 5);
+  assert.equal(mesa.canalDoControle(comTemplate({ 8: 0x1f })), 32);
+  // O manual aceita 0D e 7F no byte 4, e qualquer device number em 1n.
+  assert.equal(mesa.canalDoControle(comTemplate({ 4: 0x7f })), 1);
+  assert.equal(mesa.canalDoControle(comTemplate({ 2: 0x1f, 8: 0x02 })), 3);
+});
+
+test('canalDoControle recusa o que nao da para trocar so o canal com seguranca', () => {
+  assert.equal(mesa.canalDoControle({ ...bumbo(), calibrado: false }), null);
+  assert.equal(mesa.canalDoControle(null), null);
+  assert.equal(mesa.canalDoControle(comTemplate({ 8: 0x20 })), null, 'cc acima de 31');
+  assert.equal(mesa.canalDoControle(comTemplate({ 4: 0x0e })), null, 'byte 4 fora de 0D/7F');
+  assert.equal(mesa.canalDoControle(comTemplate({ 3: 0x3f })), null, 'outro modelo de mesa');
+  assert.equal(mesa.canalDoControle(comTemplate({ 1: 0x41 })), null, 'outro fabricante');
+  assert.equal(mesa.canalDoControle(comTemplate({ 2: 0x30 })), null, 'quadro de pedido, nao de mudanca');
+  assert.equal(mesa.canalDoControle(comTemplate({ 0: 0xf1 })), null, 'nao comeca com F0');
+  // O valor precisa morar depois do byte do canal.
+  assert.equal(mesa.canalDoControle({ ...bumbo(), valueOffset: 8 }), null);
+  assert.equal(mesa.canalDoControle({ ...bumbo(), valueOffset: 7, valueLength: 4 }), null);
+  // Curto demais para ter tt ee pp cc e um byte de valor.
+  const curto = [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0xf7];
+  assert.equal(mesa.canalDoControle({ ...bumbo(), template: curto, valueOffset: 8, valueLength: 1 }), null);
+});
+
+test('controleParaCanal troca so o byte do canal e nao mexe no original', () => {
+  const base = bumbo();
+  const c5 = mesa.controleParaCanal(base, 5);
+  assert.deepEqual(c5, {
+    calibrado: true,
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x04, 0x00, 0x00, 0xf7],
+    valueOffset: 9,
+    valueLength: 2,
+    rawMin: 0,
+    rawMax: 255
+  });
+  assert.deepEqual(base.template, MINIMO);
+  assert.equal(mesa.canalDoControle(c5), 5);
+  assert.deepEqual(mesa.validarControle(c5), []);
+  // O fader do canal novo manda o mesmo quadro do canal base, so com o cc trocado.
+  assert.deepEqual(mesa.montarFrame(c5, 1), [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x04, 0x01, 0x7f, 0xf7]);
+});
+
+test('controleParaCanal e montarPedido recusam canal fora de 1..32 e formato estranho', () => {
+  for (const canal of [0, 33, 1.5, '2', null]) {
+    assert.throws(() => mesa.controleParaCanal(bumbo(), canal), /Canal fora/);
+    assert.throws(() => mesa.montarPedido(bumbo(), canal), /Canal fora/);
+  }
+  const estranho = comTemplate({ 4: 0x0e });
+  assert.throws(() => mesa.controleParaCanal(estranho, 2), /formato do manual/);
+  assert.throws(() => mesa.montarPedido(estranho, 2), /formato do manual/);
+});
+
+test('montarPedido e um Parameter request (3n) do mesmo endereco, sem valor', () => {
+  assert.deepEqual(
+    mesa.montarPedido(bumbo(), 1),
+    [0xf0, 0x43, 0x30, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0xf7]
+  );
+  assert.deepEqual(
+    mesa.montarPedido(bumbo(), 32),
+    [0xf0, 0x43, 0x30, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x1f, 0xf7]
+  );
+  // Device number e o 7F do byte 4 vem do molde calibrado.
+  assert.deepEqual(
+    mesa.montarPedido(comTemplate({ 2: 0x1a, 4: 0x7f }), 3),
+    [0xf0, 0x43, 0x3a, 0x3e, 0x7f, 0x01, 0x1c, 0x00, 0x02, 0xf7]
+  );
+});
+
+test('mesmoEndereco compara tudo menos a janela do valor', () => {
+  const base = bumbo();
+  assert.equal(mesa.mesmoEndereco(base, mesa.controleParaCanal(base, 1)), true);
+  assert.equal(mesa.mesmoEndereco(base, { ...base, template: MAXIMO }), true, 'so o valor muda');
+  assert.equal(mesa.mesmoEndereco(base, mesa.controleParaCanal(base, 2)), false, 'outro canal');
+  assert.equal(mesa.mesmoEndereco(base, comTemplate({ 6: 0x1d })), false, 'outro parametro');
+  assert.equal(mesa.mesmoEndereco(base, { ...base, valueOffset: 10, valueLength: 1 }), false, 'outra janela');
+  assert.equal(mesa.mesmoEndereco(base, { ...base, template: MINIMO.slice(1) }), false, 'outro tamanho');
+  assert.equal(mesa.mesmoEndereco(base, { ...base, calibrado: false }), false);
+  assert.equal(mesa.mesmoEndereco(null, base), false);
+});

@@ -140,6 +140,37 @@ Uma vez por controle, para sempre, e o resultado fica no `config.json`.
 
 Enquanto um controle não estiver calibrado, o bridge **nunca** envia MIDI dele.
 
+## Criar os outros canais de uma vez
+
+Calibrar 32 canais um por um cansa. Dá para calibrar **um** e deixar o app
+criar o resto:
+
+1. Calibre um canal normalmente (por exemplo o canal 1, tipo canal).
+2. Abra os ajustes, escolha esse canal como modelo e marque os canais que
+   quer criar.
+3. O app pergunta para a mesa, canal por canal, qual é o valor atual daquele
+   send. Só vira fader o canal que a mesa **responder**. Os que ficarem calados
+   aparecem como "sem resposta" e não são criados.
+
+Essa pergunta é um pedido de leitura: **não muda nada no som**. Cada fader
+novo já nasce na posição em que está na mesa, e os canais que você já tinha
+calibrado ficam como estão.
+
+Eles aparecem como "Canal 2", "Canal 3"... Na primeira vez, mexa no
+"Canal 5" pelo app e confira na mesa se foi o send do canal 5 que andou.
+
+**Se nenhum canal responder**: no menu MIDI/HOST da mesa, ligue o
+**Parameter Change RX** e deixe o **Rx CH** igual ao Device ID. A mesa
+também precisa estar ligada no cabo USB na hora.
+
+**Se o app disser que o controle não está no formato do manual**: aquele
+canal não serve de modelo. Calibre os canais um a um, como antes.
+
+### Trocar o nome de um controle
+
+Nos ajustes, renomeie "Canal 5" para "Teclado" (até 40 letras). Só o nome
+muda: a calibração e o volume no seu fone continuam iguais.
+
 ---
 
 ## Usando no dia a dia
@@ -204,7 +235,8 @@ calibração pelo celular escreve aqui.
     "entrada": null,
     "saida": null,
     "intervaloEnvioMs": 25,
-    "janelaEcoMs": 400
+    "janelaEcoMs": 400,
+    "esperaRespostaMs": 300
   },
   "aplicarEstadoAoIniciar": false,
   "controles": []
@@ -217,6 +249,7 @@ calibração pelo celular escreve aqui.
 | `midi.intervaloEnvioMs` | De quanto em quanto tempo o lote de mudanças vai para a mesa |
 | `midi.janelaEcoMs` | Tempo em que o bridge ignora o que a mesa devolve logo depois de um envio, para o fader não tremer na mão |
 | `midi.intervaloProcuraMs` | De quanto em quanto tempo ele confere se a mesa sumiu ou apareceu no cabo (padrão 10000, dez segundos) |
+| `midi.esperaRespostaMs` | Ao criar canais de uma vez, quanto tempo ele espera a mesa responder cada canal antes de dar como "sem resposta" (padrão 300) |
 | `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar. É o que o botão "devolver o meu mix" do app liga e desliga |
 
 Cada controle calibrado fica assim:
@@ -239,6 +272,9 @@ Cada controle calibrado fica assim:
 essa mensagem e troca só os bytes a partir de `valueOffset`, com o seu valor
 0..1 esticado entre `rawMin` e `rawMax`.
 
+Um canal criado a partir de outro é igual, com o byte do canal trocado e mais
+`"geradoDe": "bumbo"`, para saber de qual modelo ele veio.
+
 Esse arquivo é a sua calibração inteira. Vale guardar uma cópia.
 
 ## Protocolo WebSocket
@@ -252,21 +288,36 @@ Celular para o bridge:
 { "type": "learn:capturar", "step": "min" }
 { "type": "learn:salvar" }
 { "type": "controle:remover", "control": "bumbo" }
+{ "type": "controle:renomear", "control": "canal-5", "label": "Teclado" }
+{ "type": "gerar:canais", "base": "bumbo", "canais": [2, 3, 4, 5] }
 { "type": "config:devolverMix", "ligado": true }
 ```
 
 Bridge para o celular:
 
 ```json
-{ "type": "controls", "controls": [ { "id": "bumbo", "label": "Bumbo", "type": "canal", "calibrated": true } ] }
+{ "type": "controls", "controls": [ { "id": "bumbo", "label": "Bumbo", "type": "canal", "calibrated": true, "canal": 1 } ] }
 { "type": "status",   "devolverMix": false, "midi": { "simulado": false, "saida": "01V96" } }
 { "type": "state",    "values": { "bumbo": 0.72 }, "mutes": { "bumbo": false } }
 { "type": "learn:midi", "count": 42, "hex": "F0 43 ..." }
 { "type": "learn:salvo", "control": { }, "faixa": { }, "bytes": { }, "avisos": [ ] }
+{ "type": "learn:erro", "message": "Estou criando canais agora. ...", "etapa": "nome" }
+{ "type": "gerar:progresso", "canal": 2, "feitos": 1, "total": 4, "confirmado": true }
+{ "type": "gerar:fim", "criados": [ { "id": "canal-2", "label": "Canal 2", "canal": 2 } ], "semResposta": [4], "jaExistiam": [], "interrompido": false }
+{ "type": "gerar:erro", "message": "Ligue a mesa no cabo USB: ..." }
+{ "type": "controle:erro", "message": "Escreva um nome para o controle." }
 ```
 
 Ao conectar, o celular recebe os três primeiros. Depois disso, toda mudança
 vira um `state` enviado para os outros celulares, mantendo todo mundo igual.
+
+O campo `canal` só vem nos controles que servem de modelo para criar os
+outros. `gerar:progresso`, `gerar:fim` e os erros vão só para o celular que
+pediu; logo depois do `gerar:fim`, todos recebem `controls` e `state`
+atualizados. `controle:erro` é a resposta quando renomear ou remover um
+controle não dá certo. `learn:erro` com `"etapa": "nome"` volta o assistente
+de calibração para o passo do nome (acontece quando alguém tenta calibrar
+enquanto os canais estão sendo criados).
 
 ## Quando algo não funciona
 
@@ -276,6 +327,11 @@ vira um `state` enviado para os outros celulares, mantendo todo mundo igual.
 | "Sem conexão com o bridge" | O programa não está rodando. No Pi: `systemctl status monitor-01v96`. No Windows: rode `node src\bridge.js` na pasta para ver o erro |
 | Durante a calibração, o contador fica em zero | Parameter Change **TX** desligado na mesa, ou porta MIDI errada (`USB` x `MIDI`) |
 | Calibrei mas o fader não muda o som | Parameter Change **RX** desligado na mesa |
+| Ao criar canais de uma vez, nenhum respondeu | Parameter Change **RX** desligado, ou **Rx CH** diferente do Device ID, no menu MIDI/HOST da mesa |
+| Ao criar canais, o app pede para ligar a mesa no cabo | A mesa precisa estar ligada e conectada na hora: é ela que confirma cada canal |
+| O app pede para esperar antes de calibrar ou de criar canais | Calibrar e criar canais não rodam ao mesmo tempo. Espere o outro terminar (ou cancele a calibração aberta) e tente de novo |
+| Ao criar canais, diz que o controle "não está no formato do manual" | Aquele canal não serve de modelo. Calibre os canais um a um |
+| O fader "Canal 5" mexe em outro canal da mesa | Apague os canais criados, calibre um a um e mande o diagnóstico do app para quem cuida do programa |
 | Rodapé diz "sem mesa conectada" | Confira o cabo USB e se a mesa está ligada. Se houver mais de um aparelho MIDI, escolha a porta no botão de ajustes do app |
 | O fader treme sozinho | Desligue o **ECHO** de Parameter Change na mesa, ou aumente `janelaEcoMs` |
 | O endereço mudou de uma semana para outra | Reserve o IP da máquina no roteador |

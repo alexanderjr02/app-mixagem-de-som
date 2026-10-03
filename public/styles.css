@@ -678,6 +678,47 @@ select.painel__campo {
   accent-color: var(--texto);
 }
 
+.bloco__texto {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--texto-2);
+}
+
+/* Dentro do bloco, o que tem fundo proprio desce um tom para nao sumir. */
+.bloco .painel__erro,
+.bloco .medidor { background-color: var(--superficie); }
+
+.bloco__atalhos {
+  display: flex;
+  gap: 6px;
+}
+
+/* Parte do bloco que some junto quando falta o que mostrar. Mesmo ritmo do
+   bloco, para .bloco__retorno continuar acertando o vao. */
+.bloco__grupo {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.bloco__atalhos .botao {
+  flex: 1;
+  min-height: 40px;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
+/* Resumo e erro da ultima conferencia. Vazio, nao pode deixar um vao a mais
+   no bloco: a margem negativa devolve o gap que o flex do pai poe antes dele. */
+.bloco__retorno {
+  display: flex;
+  flex-direction: column;
+  margin-top: -9px;
+}
+
+.bloco__retorno > * { margin-top: 9px; }
+
 /* ---------------------- lista de controles (ajustes) --------------------- */
 
 .lista {
@@ -707,13 +748,62 @@ select.painel__campo {
   min-width: 0;
 }
 
+/* O nome e o botao de renomear: area grande para o dedo, cara de texto. */
+.lista__renomear {
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 40px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lista__renomear:active .lista__linha { opacity: 0.6; }
+
+.lista__renomear:focus-visible {
+  outline: 2px solid var(--texto);
+  outline-offset: 4px;
+}
+
+.lista__linha {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* Alinhado com a primeira linha do nome (15px x 1.3). */
+.lista__lapis {
+  width: 14px;
+  height: 14px;
+  margin-top: 2.5px;
+  flex: none;
+  fill: none;
+  stroke: var(--texto-3);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Ate duas linhas: com o renomear, "Violao do Pedro" vira nome comum, e em
+   360px uma linha so cortaria quase todos. */
 .lista__nome {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
   font-size: 15px;
   font-weight: 550;
+  line-height: 1.3;
   letter-spacing: -0.01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .lista__estado {
@@ -731,6 +821,8 @@ select.painel__campo {
   gap: 6px;
   flex: none;
 }
+
+.lista__acoes .botao { min-height: 40px; }
 
 .lista__vazio {
   padding: 18px 12px;
@@ -801,6 +893,86 @@ select.painel__campo {
   font-weight: 600;
 }
 
+/* ---------------------- grade de canais da mesa -------------------------- */
+
+/* Vem depois de .opcoes__item de proposito: o botao da grade e um item de
+   opcao (mesmo aria-pressed marcado), so que solto e com borda.
+   8 por linha, como os blocos de faders da mesa. Um respiro a mais entre o 16
+   e o 17 separa as duas camadas (1-16 e 17-32). */
+.grade {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.grade__canal {
+  position: relative;
+  min-height: 44px;
+  padding: 0;
+  background: var(--superficie);
+  border: 1px solid var(--linha);
+  color: var(--texto-2);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.grade__canal:nth-child(n+17):nth-child(-n+24) { margin-top: 6px; }
+
+.grade__canal[aria-pressed="true"] { border-color: var(--texto); }
+
+.grade__canal:focus-visible {
+  outline: 2px solid var(--texto);
+  outline-offset: 1px;
+}
+
+/* Canal que ja tem controle: fica visivel, com o ponto de "ja tenho", mas nao
+   da para marcar de novo. */
+.grade__canal--existe {
+  background: var(--superficie-3);
+  border-color: transparent;
+  color: var(--texto-3);
+  cursor: default;
+}
+
+.grade__canal--existe::after,
+.grade__existe::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--texto-2);
+}
+
+.grade__canal--existe::after {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+}
+
+.grade[data-travada="1"] .grade__canal { opacity: 0.5; cursor: default; }
+
+.grade__legenda {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--texto-3);
+}
+
+.grade__existe {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#gerarContagem {
+  color: var(--texto-2);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Medidor ao vivo: mostra que a mesa esta mesmo mandando mensagem. */
 .medidor {
   display: flex;
@@ -843,6 +1015,28 @@ select.painel__campo {
 @keyframes bater {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.5); opacity: 0.45; }
+}
+
+.medidor__barra {
+  display: block;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--linha);
+  overflow: hidden;
+}
+
+.medidor__barra > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--texto);
+  transition: width 0.2s ease;
+}
+
+.medidor__detalhe {
+  font-size: 12.5px;
+  color: var(--texto-3);
 }
 
 .medidor__hex {
@@ -893,4 +1087,5 @@ select.painel__campo {
   .conexao__ponto,
   .medidor__texto--ativo::before,
   .painel[open] { animation: none; }
+  .medidor__barra > span { transition: none; }
 }

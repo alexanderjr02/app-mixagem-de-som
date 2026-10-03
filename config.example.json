@@ -10,7 +10,8 @@
     "entrada": null,
     "saida": null,
     "intervaloEnvioMs": 25,
-    "janelaEcoMs": 400
+    "janelaEcoMs": 400,
+    "esperaRespostaMs": 300
   },
 
   "aplicarEstadoAoIniciar": false,

@@ -46,6 +46,7 @@ test('mantem o que o usuario escreveu e completa o resto com padroes', () => {
   assert.equal(cfg.midi.saida, '01V96');
   assert.equal(cfg.midi.intervaloEnvioMs, 25);
   assert.equal(cfg.midi.janelaEcoMs, 400);
+  assert.equal(cfg.midi.esperaRespostaMs, 300);
   assert.equal(cfg.servidor.porta, 9000);
   assert.equal(cfg.servidor.host, '0.0.0.0');
   assert.deepEqual(cfg.controles, []);

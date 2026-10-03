@@ -92,6 +92,8 @@ async function conectarCelular(porta) {
       }, 'mensagem "' + tipo + '"', ms);
     },
     esquecer: () => { recebidas.length = 0; },
+    /** Ja chegou alguma mensagem desse tipo (sem tirar da fila)? */
+    viu: (tipo) => recebidas.some((m) => m.type === tipo),
     fechar: () => ws.close()
   };
 }
@@ -305,6 +307,73 @@ test('quando alguem mexe direto na mesa, os dois celulares acompanham', async ()
   }
 });
 
+test('criar os outros canais sem a mesa no cabo e recusado, so para quem pediu', async () => {
+  await pausa(INTERVALO_IMPRESSAO);
+  const desde = bridge.linhas.length;
+
+  celularA.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2, 3] });
+  assert.match((await celularA.receber('gerar:erro')).message, /cabo USB/);
+
+  celularA.enviar({ type: 'gerar:canais', base: 'guitarra', canais: [2] });
+  assert.match((await celularA.receber('gerar:erro')).message, /Calibre este canal/);
+
+  celularA.enviar({ type: 'gerar:canais', base: 'nao-existe', canais: [2] });
+  assert.match((await celularA.receber('gerar:erro')).message, /Nao achei/);
+
+  await pausa(INTERVALO_IMPRESSAO);
+  assert.equal(celularB.viu('gerar:erro'), false);
+  assert.deepEqual(enviosDesde(desde), []);
+});
+
+test('enquanto alguem calibra, ninguem cria canais (a resposta da mesa cairia na calibracao)', async () => {
+  celularA.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+  await celularA.receber('learn:pronto-para');
+
+  celularB.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] });
+  assert.match((await celularB.receber('gerar:erro')).message, /calibrando um controle agora/);
+  assert.equal(celularA.viu('gerar:erro'), false);
+
+  // Calibracao cancelada: a recusa passa a ser outra (aqui, a falta da mesa).
+  celularA.enviar({ type: 'learn:cancelar' });
+  await pausa(50);
+  celularB.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] });
+  assert.match((await celularB.receber('gerar:erro')).message, /cabo USB/);
+});
+
+test('a lista do app diz o canal de quem serve de modelo para criar os outros', async () => {
+  const { controls } = JSON.parse((await pedir(bridge.porta, 'GET', '/api/controls')).texto);
+  const bumbo = controls.find((c) => c.id === 'bumbo');
+  const guitarra = controls.find((c) => c.id === 'guitarra');
+  assert.equal(bumbo.canal, 1);
+  assert.equal(Object.hasOwn(guitarra, 'canal'), false, 'nao calibrado nao tem canal');
+});
+
+test('renomear muda so o nome, no app e no config.json', async () => {
+  const lerBumbo = () => JSON.parse(fs.readFileSync(path.join(bridge.pasta, 'config.json'), 'utf8'))
+    .controles.find((c) => c.id === 'bumbo');
+  const antes = lerBumbo();
+
+  celularA.enviar({ type: 'controle:renomear', control: 'bumbo', label: '  Bumbo do Joao  ' });
+  const lista = await celularB.receber('controls', (m) => m.controls.some((c) => c.label === 'Bumbo do Joao'));
+  const item = lista.controls.find((c) => c.id === 'bumbo');
+  assert.equal(item.calibrated, true);
+  assert.equal(item.canal, 1);
+
+  const depois = lerBumbo();
+  assert.equal(depois.rotulo, 'Bumbo do Joao');
+  assert.deepEqual({ ...depois, rotulo: antes.rotulo }, antes, 'id e calibracao continuam iguais');
+
+  celularA.enviar({ type: 'controle:renomear', control: 'bumbo', label: 'B'.repeat(60) });
+  await celularB.receber('controls', (m) => m.controls.some((c) => c.label === 'B'.repeat(40)));
+
+  celularA.enviar({ type: 'controle:renomear', control: 'bumbo', label: '   ' });
+  assert.match((await celularA.receber('controle:erro')).message, /nome/);
+  celularA.enviar({ type: 'controle:renomear', control: 'nao-existe', label: 'Teclado' });
+  assert.match((await celularA.receber('controle:erro')).message, /Nao achei/);
+  assert.equal(lerBumbo().rotulo, 'B'.repeat(40));
+  assert.equal(celularB.viu('controle:erro'), false);
+});
+
 test('devolver o mix quando a mesa ligar se liga pelo celular, sem editar arquivo', async () => {
   const lerConfig = () => JSON.parse(fs.readFileSync(path.join(bridge.pasta, 'config.json'), 'utf8'));
 
@@ -345,6 +414,11 @@ test('o ultimo mix vai para o estado.json da pasta de dados', async () => {
  * O teste controla por um arquivo quais portas existem e a "geracao" do cabo:
  * se a porta some, ou o cabo sai e volta (geracao nova), o envio pela porta
  * antiga falha, como acontece com a porta morta de verdade.
+ *
+ * Ela tambem responde Parameter request (F0 43 3n ...) como o manual descreve:
+ * devolve, pelas entradas abertas, o Parameter change do mesmo endereco com o
+ * valor de "respostas" no arquivo ({ "2": [0, 64] } = canal 2 responde 64).
+ * Canal ausente em "respostas" = a mesa fica calada.
  */
 const MESA_FALSA = `
 const Module = require('module');
@@ -352,6 +426,16 @@ const fs = require('fs');
 const ARQUIVO = process.env.MESA_FALSA;
 function mesa() {
   try { return JSON.parse(fs.readFileSync(ARQUIVO, 'utf8')); } catch { return { portas: [], geracao: 0 }; }
+}
+const entradasAbertas = new Set();
+function responderPedido(bytes) {
+  if ((bytes[2] & 0xf0) !== 0x30) return;
+  const valor = (mesa().respostas || {})[String(bytes[8] + 1)];
+  if (!Array.isArray(valor)) return;
+  const quadro = [0xf0, 0x43, 0x10 | (bytes[2] & 0x0f), ...bytes.slice(3, 9), ...valor, 0xf7];
+  setTimeout(() => {
+    for (const entrada of entradasAbertas) if (entrada.aoReceber) entrada.aoReceber(0, quadro);
+  }, 5);
 }
 class Porta {
   getPortCount() { return mesa().portas.length; }
@@ -373,9 +457,15 @@ class Porta {
     }
     const hex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
     console.log('[mesa falsa] #' + this.geracao + ' ' + hex);
+    responderPedido(bytes);
   }
 }
-const falso = { Input: Porta, Output: Porta };
+class Entrada extends Porta {
+  on(evento, aoReceber) { if (evento === 'message') this.aoReceber = aoReceber; }
+  openPort(i) { super.openPort(i); entradasAbertas.add(this); }
+  closePort() { super.closePort(); entradasAbertas.delete(this); }
+}
+const falso = { Input: Entrada, Output: Porta };
 const carregar = Module._load;
 Module._load = function (pedido, ...resto) {
   if (pedido === '@julusian/midi' || pedido === 'midi') return falso;
@@ -383,17 +473,47 @@ Module._load = function (pedido, ...resto) {
 };
 `;
 
-test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', async () => {
+/** Prepara a mesa de teste numa pasta temporaria; "fica" muda o que ela tem. */
+function prepararMesaFalsa() {
   const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'monitor-mesa-falsa-'));
   const preload = path.join(pasta, 'mesa-falsa.js');
-  const estadoMesa = path.join(pasta, 'mesa.json');
+  const arquivo = path.join(pasta, 'mesa.json');
   fs.writeFileSync(preload, MESA_FALSA);
-
-  // Escreve e renomeia, para o bridge nunca ler o arquivo pela metade.
-  const mesaFica = (portas, geracao) => {
-    fs.writeFileSync(estadoMesa + '.tmp', JSON.stringify({ portas, geracao }));
-    fs.renameSync(estadoMesa + '.tmp', estadoMesa);
+  return {
+    preload,
+    arquivo,
+    // Escreve e renomeia, para o bridge nunca ler o arquivo pela metade. No
+    // Windows o rename falha (EPERM/EBUSY) se o bridge estiver lendo o arquivo
+    // naquele instante; tenta de novo alguns milissegundos depois.
+    fica(estado) {
+      fs.writeFileSync(arquivo + '.tmp', JSON.stringify(estado));
+      for (let tentativa = 1; ; tentativa++) {
+        try {
+          fs.renameSync(arquivo + '.tmp', arquivo);
+          return;
+        } catch (erro) {
+          if (!['EPERM', 'EBUSY', 'EACCES'].includes(erro.code) || tentativa >= 100) throw erro;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        }
+      }
+    },
+    apagar: () => fs.rmSync(pasta, { recursive: true, force: true })
   };
+}
+
+/** Quadros que o bridge mandou para a mesa de teste desde a linha "desde". */
+function quadrosParaMesa(linhas, desde) {
+  return linhas
+    .slice(desde)
+    .filter((l) => l.includes('[mesa falsa] #'))
+    .map((l) => l.slice(l.indexOf('[mesa falsa] #')).split(' ').slice(3).map((h) => parseInt(h, 16)));
+}
+
+test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', async () => {
+  const mesaTeste = prepararMesaFalsa();
+  const preload = mesaTeste.preload;
+  const estadoMesa = mesaTeste.arquivo;
+  const mesaFica = (portas, geracao) => mesaTeste.fica({ portas, geracao });
   mesaFica(['Microsoft GS Wavetable Synth', 'YAMAHA 01V96'], 1);
 
   const bumbo = { id: 'bumbo', rotulo: 'Bumbo', tipo: 'canal', calibrado: true,
@@ -439,7 +559,195 @@ test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', 
   } finally {
     celular.fechar();
     await b.parar();
-    fs.rmSync(pasta, { recursive: true, force: true });
+    mesaTeste.apagar();
+  }
+});
+
+test('criar os outros canais: so nasce controle no canal que a mesa confirmou', async (t) => {
+  const mesaTeste = prepararMesaFalsa();
+  const PORTAS = ['Microsoft GS Wavetable Synth', 'YAMAHA 01V96'];
+  // Canais 2, 3 e 5 respondem; o 7 fica calado.
+  const respostas = { 2: [0x00, 0x40], 3: [0x01, 0x00], 5: [0x01, 0x7f] };
+  mesaTeste.fica({ portas: PORTAS, geracao: 1, respostas });
+
+  const bumbo = { id: 'bumbo', rotulo: 'Bumbo', tipo: 'canal', valorInicial: 0.3, calibrado: true,
+    template: MINIMO, valueOffset: 9, valueLength: 2, rawMin: 0, rawMax: 255 };
+  // Canal 4 ja calibrado a mao, igualzinho ao que seria gerado.
+  const caixa = { id: 'caixa', rotulo: 'Caixa', tipo: 'canal', ...mesa.controleParaCanal(bumbo, 4) };
+  // Canal 6 calibrado a mao com a janela menor (so o byte de baixo mexeu): mesmo parametro.
+  const tom = { id: 'tom', rotulo: 'Tom', tipo: 'canal', calibrado: true,
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x05, 0x00, 0x00, 0xf7],
+    valueOffset: 10, valueLength: 1, rawMin: 0, rawMax: 127 };
+  const reverb = { ...bumbo, id: 'reverb', rotulo: 'Reverb', tipo: 'reverb',
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1d, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+  const estranho = { ...bumbo, id: 'estranho', rotulo: 'Estranho',
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x7e, 0x01, 0x1c, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+
+  const b = await subirBridge({
+    config: {
+      midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
+        intervaloProcuraMs: 100, esperaRespostaMs: 600 },
+      aplicarEstadoAoIniciar: false,
+      controles: [bumbo, caixa, tom, reverb, estranho]
+    },
+    antes: ['--require', mesaTeste.preload],
+    env: { MESA_FALSA: mesaTeste.arquivo }
+  });
+  const celular = await conectarCelular(b.porta);
+  const lerConfig = () => JSON.parse(fs.readFileSync(path.join(b.pasta, 'config.json'), 'utf8'));
+  const pedido = (canal) => mesa.montarPedido(bumbo, canal);
+
+  try {
+    assert.equal((await celular.receber('status')).midi.simulado, false);
+
+    await t.test('a lista traz o canal so de quem serve de modelo', async () => {
+      const { controls } = await celular.receber('controls');
+      const canal = Object.fromEntries(controls.map((c) => [c.id, c.canal]));
+      assert.deepEqual(canal, { bumbo: 1, caixa: 4, tom: 6, reverb: undefined, estranho: undefined });
+      assert.equal(Object.hasOwn(controls.find((c) => c.id === 'reverb'), 'canal'), false);
+    });
+
+    await t.test('recusa modelo que nao serve e lista de canais invalida, sem mandar nada', async () => {
+      const desde = b.linhas.length;
+      const recusa = async (msg, motivo) => {
+        celular.enviar({ type: 'gerar:canais', ...msg });
+        assert.match((await celular.receber('gerar:erro')).message, motivo, JSON.stringify(msg));
+      };
+      await recusa({ base: 'reverb', canais: [2] }, /a partir de um canal/);
+      await recusa({ base: 'estranho', canais: [2] }, /formato do manual da 01V96, calibre os canais um a um/);
+      for (const canais of ['2', [0], [33], [1.5], ['2'], Array.from({ length: 33 }, () => 2)]) {
+        await recusa({ base: 'bumbo', canais }, /canais de 1 a 32/);
+      }
+      await recusa({ base: 'bumbo', canais: [] }, /pelo menos um canal/);
+      await pausa(50);
+      assert.deepEqual(quadrosParaMesa(b.linhas, desde), []);
+    });
+
+    await t.test('confere canal por canal com pedido de leitura e cria so os confirmados', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [7, 1, 2, 3, 4, 5, 6, 2] });
+
+      const fim = await celular.receber('gerar:fim', () => true, 5000);
+      assert.deepEqual(fim, {
+        type: 'gerar:fim',
+        criados: [
+          { id: 'canal-2', label: 'Canal 2', canal: 2 },
+          { id: 'canal-3', label: 'Canal 3', canal: 3 },
+          { id: 'canal-5', label: 'Canal 5', canal: 5 }
+        ],
+        semResposta: [7],
+        jaExistiam: [1, 4, 6],
+        interrompido: false
+      });
+
+      const progresso = [];
+      for (let i = 0; i < 4; i++) {
+        const { canal, feitos, total, confirmado } = await celular.receber('gerar:progresso');
+        progresso.push([canal, feitos, total, confirmado]);
+      }
+      assert.deepEqual(progresso, [[2, 1, 4, true], [3, 2, 4, true], [5, 3, 4, true], [7, 4, 4, false]]);
+
+      // Os celulares recebem a lista nova e o valor que a mesa informou.
+      const { controls } = await celular.receber('controls', (m) => m.controls.some((c) => c.id === 'canal-5'));
+      const canal2 = controls.find((c) => c.id === 'canal-2');
+      assert.deepEqual(canal2, { id: 'canal-2', label: 'Canal 2', type: 'canal', calibrated: true, canal: 2 });
+      assert.equal(controls.some((c) => c.id === 'canal-7'), false, 'canal calado nao vira controle');
+      const estado = await celular.receber('state', (m) => 'canal-2' in m.values);
+      assert.equal(estado.values['canal-2'], 64 / 255);
+      assert.equal(estado.values['canal-3'], 128 / 255);
+      assert.equal(estado.values['canal-5'], 1);
+      assert.equal(estado.mutes['canal-2'], false);
+
+      // Gravado no config.json, depois dos que ja existiam, em ordem de canal.
+      const gravado = lerConfig().controles;
+      assert.deepEqual(gravado.map((c) => c.id),
+        ['bumbo', 'caixa', 'tom', 'reverb', 'estranho', 'canal-2', 'canal-3', 'canal-5']);
+      assert.deepEqual(gravado[6], {
+        id: 'canal-3', rotulo: 'Canal 3', tipo: 'canal', valorInicial: 0.3, calibrado: true,
+        template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x02, 0x00, 0x00, 0xf7],
+        valueOffset: 9, valueLength: 2, rawMin: 0, rawMax: 255, geradoDe: 'bumbo'
+      });
+
+      // Seguranca: so sairam pedidos de leitura, um por canal conferido, e
+      // nada de Parameter change, nem depois (o app so espelha a mesa).
+      await pausa(200);
+      const quadros = quadrosParaMesa(b.linhas, desde);
+      assert.deepEqual(quadros, [pedido(2), pedido(3), pedido(5), pedido(7)]);
+      for (const q of quadros) assert.equal(q[2] & 0xf0, 0x30, 'saiu algo que nao e pedido: ' + mesa.paraHex(q));
+    });
+
+    await t.test('mexer num canal criado manda o Parameter change com o byte do canal certo', async () => {
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'canal-3', value: 1 });
+      await esperarAte(
+        () => quadrosParaMesa(b.linhas, desde).some((q) => mesa.paraHex(q) === 'F0 43 10 3E 0D 01 1C 00 02 01 7F F7'),
+        'Parameter change do canal 3 no maximo'
+      );
+    });
+
+    await t.test('o celular que pediu pode sair: a mesa confirma e todos recebem', async () => {
+      mesaTeste.fica({ portas: PORTAS, geracao: 1, respostas: { ...respostas, 9: [0x00, 0x20] } });
+      const outro = await conectarCelular(b.porta);
+      outro.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [9] });
+      outro.fechar();
+
+      await celular.receber('controls', (m) => m.controls.some((c) => c.id === 'canal-9'));
+      const estado = await celular.receber('state', (m) => 'canal-9' in m.values);
+      assert.equal(estado.values['canal-9'], 32 / 255);
+      assert.equal(lerConfig().controles.some((c) => c.id === 'canal-9'), true);
+    });
+
+    await t.test('criando canais, a calibracao nao abre e o app volta para o passo do nome', async () => {
+      mesaTeste.fica({ portas: PORTAS, geracao: 1, respostas: { ...respostas, 16: [0x00, 0x30] } });
+      celular.esquecer();
+
+      // Canal 15 fica calado: a geracao fica 600 ms esperando a mesa.
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [15] });
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      assert.deepEqual(await celular.receber('learn:erro'), {
+        type: 'learn:erro',
+        message: 'Estou criando canais agora. Espere terminar para calibrar.',
+        etapa: 'nome'
+      });
+      assert.deepEqual((await celular.receber('gerar:fim', () => true, 5000)).semResposta, [15]);
+      assert.equal(celular.viu('learn:pronto-para'), false);
+
+      // Nenhuma sessao de calibracao ficou aberta: a proxima geracao passa.
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [16] });
+      const fim = await celular.receber('gerar:fim', () => true, 5000);
+      assert.deepEqual(fim.criados, [{ id: 'canal-16', label: 'Canal 16', canal: 16 }]);
+    });
+
+    await t.test('uma geracao por vez; se a mesa some no meio, salva o que ja confirmou', async () => {
+      mesaTeste.fica({ portas: PORTAS, geracao: 1, respostas: { ...respostas, 8: [0x00, 0x10] } });
+      celular.esquecer();
+      const desde = b.linhas.length;
+
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [8, 10, 11, 12] });
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [13] });
+      assert.match((await celular.receber('gerar:erro')).message, /criando canais agora/);
+
+      assert.equal((await celular.receber('gerar:progresso', (m) => m.canal === 8)).confirmado, true);
+      mesaTeste.fica({ portas: ['Microsoft GS Wavetable Synth'], geracao: 1, respostas });
+
+      const fim = await celular.receber('gerar:fim', () => true, 5000);
+      assert.equal(fim.interrompido, true);
+      assert.deepEqual(fim.criados, [{ id: 'canal-8', label: 'Canal 8', canal: 8 }]);
+      assert.equal(lerConfig().controles.some((c) => c.id === 'canal-8'), true);
+      const pedidos = quadrosParaMesa(b.linhas, desde).map((q) => mesa.paraHex(q));
+      assert.equal(pedidos.includes(mesa.paraHex(pedido(12))), false, 'continuou pedindo com a mesa fora');
+      assert.equal(pedidos.includes(mesa.paraHex(pedido(13))), false);
+
+      // Terminou: a trava solta, e sem mesa a resposta e pedir o cabo.
+      await celular.receber('status', (m) => m.midi.simulado === true);
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [14] });
+      assert.match((await celular.receber('gerar:erro')).message, /cabo USB/);
+    });
+  } finally {
+    celular.fechar();
+    await b.parar();
+    mesaTeste.apagar();
   }
 });
 

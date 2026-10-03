@@ -25,7 +25,15 @@ const CAMINHO_ESTADO = path.join(DADOS, 'estado.json');
 // Valores usados quando a chave nao existe no arquivo.
 const PADRAO = {
   servidor: { porta: 8080, host: '0.0.0.0' },
-  midi: { entrada: null, saida: null, intervaloEnvioMs: 25, janelaEcoMs: 400, intervaloProcuraMs: 10000 },
+  midi: {
+    entrada: null,
+    saida: null,
+    intervaloEnvioMs: 25,
+    janelaEcoMs: 400,
+    intervaloProcuraMs: 10000,
+    // Quanto tempo esperar a mesa responder cada Parameter request ao criar canais.
+    esperaRespostaMs: 300
+  },
   aplicarEstadoAoIniciar: false,
   controles: []
 };

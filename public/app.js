@@ -226,7 +226,10 @@ function desenharControles(lista) {
 
   atualizarRodape();
   atualizarVazio();
-  if (elAjustes.open) desenharListaAjustes();
+  if (elAjustes.open) {
+    desenharListaAjustes();
+    desenharGerar();
+  }
 }
 
 function aplicarEstado(valores, mutes) {
@@ -328,9 +331,18 @@ function conectar() {
         elDevolverMix.checked = msg.devolverMix === true;
         atualizarRodape();
         desenharEstadoDaMesa();
+        desenharGerar();
         break;
       case 'midi:portas':
         desenharPortasDaMesa(msg);
+        break;
+      case 'gerar:progresso':
+      case 'gerar:fim':
+      case 'gerar:erro':
+        receberDaGeracao(msg);
+        break;
+      case 'controle:erro':
+        alert(msg.message || 'Não consegui mudar esse controle.');
         break;
       default:
         if (msg.type && msg.type.startsWith('learn:')) receberDoAssistente(msg);
@@ -338,12 +350,26 @@ function conectar() {
   });
 
   socket.addEventListener('close', () => {
+    // Cada tentativa de reconexao que falha tambem dispara 'close'. So a queda
+    // de verdade (estava conectado) mexe na folha de ajustes.
+    const caiuAgora = conectado;
     conectado = false;
     definirConexao('offline', 'reconectando');
     atualizarRodape();
     atualizarVazio();
     atualizarBotaoAjustes();
-    if (elAjustes.open) elAjustes.close();
+    if (gerar.ativo) {
+      // Mesma ideia do assistente: a folha fica aberta para a pessoa ler o
+      // aviso, em vez de sumir e deixar a duvida se criou ou nao. Fica segura
+      // ate a propria pessoa fechar, mesmo que o Wi-Fi volte e caia de novo.
+      gerar.segurarFolha = true;
+      terminarGerar('', 'A conexão com o bridge caiu no meio da conferência. ' +
+        'O que a mesa já confirmou fica salvo; confira a lista quando reconectar.');
+    } else if (caiuAgora && elAjustes.open && !gerar.segurarFolha) {
+      elAjustes.close();
+    } else {
+      desenharGerar();
+    }
     if (assistente.ativo) {
       mostrarErroAssistente('A conexão com o bridge caiu. Refaça quando reconectar.');
     }
@@ -382,21 +408,30 @@ function desenharListaAjustes() {
     const item = document.createElement('li');
     item.className = 'lista__item';
 
-    const info = document.createElement('div');
-    info.className = 'lista__info';
+    // O nome inteiro e o botao de renomear. Um terceiro botao ao lado de
+    // Recalibrar e Remover nao cabe em 360px sem quebrar a linha, e a lista
+    // pode chegar a 30 e tantos itens depois de criar os canais.
+    const info = document.createElement('button');
+    info.type = 'button';
+    info.className = 'lista__info lista__renomear';
+    info.setAttribute('aria-label', 'Renomear "' + controle.label + '"');
+    info.addEventListener('click', () => renomearControle(controle));
+
+    const linha = document.createElement('span');
+    linha.className = 'lista__linha';
 
     const nome = document.createElement('span');
     nome.className = 'lista__nome';
     nome.textContent = controle.label;
 
+    linha.append(nome, iconeLapis());
+
     const estado = document.createElement('span');
     estado.className = 'lista__estado';
-    estado.textContent = controle.calibrated
-      ? (controle.type === 'master' ? 'volume geral' : controle.type === 'reverb' ? 'reverb' : 'canal')
-      : 'falta calibrar';
+    estado.textContent = controle.calibrated ? descreverTipo(controle) : 'falta calibrar';
     if (!controle.calibrated) estado.classList.add('lista__estado--pendente');
 
-    info.append(nome, estado);
+    info.append(linha, estado);
 
     const acoes = document.createElement('div');
     acoes.className = 'lista__acoes';
@@ -415,6 +450,10 @@ function desenharListaAjustes() {
     remover.type = 'button';
     remover.textContent = 'Remover';
     remover.addEventListener('click', () => {
+      if (!conectado) {
+        alert('Sem conexão com o bridge. Remova quando reconectar.');
+        return;
+      }
       if (!confirm('Remover "' + controle.label + '" do seu monitor?')) return;
       enviar({ type: 'controle:remover', control: controle.id });
     });
@@ -422,6 +461,342 @@ function desenharListaAjustes() {
     acoes.append(calibrar, remover);
     item.append(info, acoes);
     elListaControles.appendChild(item);
+  }
+}
+
+function descreverTipo(controle) {
+  if (controle.type === 'master') return 'volume geral';
+  if (controle.type === 'reverb') return 'reverb';
+  return canalDaMesa(controle) ? 'canal ' + controle.canal + ' da mesa' : 'canal';
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function iconeLapis() {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('class', 'lista__lapis');
+  const traco = document.createElementNS(SVG_NS, 'path');
+  traco.setAttribute('d', 'M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4');
+  svg.appendChild(traco);
+  return svg;
+}
+
+const NOME_MAX = 40;
+
+function renomearControle(controle) {
+  if (!conectado) {
+    alert('Sem conexão com o bridge. Renomeie quando reconectar.');
+    return;
+  }
+
+  let sugestao = controle.label;
+  for (;;) {
+    const digitado = prompt('Novo nome para "' + controle.label + '"', sugestao);
+    if (digitado === null) return; // cancelou
+
+    const nome = digitado.trim();
+    if (!nome) {
+      alert('O nome não pode ficar vazio.');
+      continue;
+    }
+    if (nome.length > NOME_MAX) {
+      alert('Use no máximo ' + NOME_MAX + ' letras. Cortei o que passou, confira.');
+      sugestao = nome.slice(0, NOME_MAX).trim();
+      continue;
+    }
+    if (nome === controle.label) return;
+
+    // A resposta de sucesso e a lista nova ("controls"), que redesenha tudo.
+    enviar({ type: 'controle:renomear', control: controle.id, label: nome });
+    return;
+  }
+}
+
+/* ---- criar os outros canais a partir de um calibrado ------------------ */
+
+const TOTAL_CANAIS = 32;
+const ESPERA_MAX_GERAR = 20000; // sem noticia do bridge por tanto tempo = travou
+
+const elGerarExplica = document.getElementById('gerarExplica');
+const elGerarGrade = document.getElementById('gerarGrade');
+const elGerarContagem = document.getElementById('gerarContagem');
+const elGerarAtalhos = document.getElementById('gerarAtalhos');
+const elGerarProgresso = document.getElementById('gerarProgresso');
+const elGerarProgressoTexto = document.getElementById('gerarProgressoTexto');
+const elGerarConteudo = document.getElementById('gerarConteudo');
+const elGerarBarra = document.getElementById('gerarBarra');
+const elGerarBarraTrilho = document.getElementById('gerarBarraTrilho');
+const elGerarUltimo = document.getElementById('gerarUltimo');
+const elGerarResumo = document.getElementById('gerarResumo');
+const elGerarErro = document.getElementById('gerarErro');
+const elGerarMotivo = document.getElementById('gerarMotivo');
+const elBtnGerar = document.getElementById('btnGerar');
+
+const gerar = {
+  ativo: false,
+  marcados: new Set(),  // canais escolhidos na grade
+  enviados: [],         // o que foi pedido na ultima conferencia
+  feitos: 0,
+  total: 0,
+  resumo: '',
+  erro: '',
+  vigia: null,
+  segurarFolha: false   // a conexao caiu no meio: a folha so fecha pela pessoa
+};
+
+elAjustes.addEventListener('close', () => { gerar.segurarFolha = false; });
+
+/** O numero do canal da mesa (1..32) que o controle conhece, ou null. */
+function canalDaMesa(controle) {
+  const n = controle && controle.canal;
+  return Number.isInteger(n) && n >= 1 && n <= TOTAL_CANAIS ? n : null;
+}
+
+function controleBase() {
+  return listaControles.find((c) => canalDaMesa(c)) || null;
+}
+
+function canaisQueJaExistem() {
+  const usados = new Set();
+  for (const c of listaControles) {
+    const n = canalDaMesa(c);
+    if (n) usados.add(n);
+  }
+  return usados;
+}
+
+/** Motivo para nao poder conferir agora, ou '' quando a mesa pode responder. */
+function motivoMesaIndisponivel() {
+  if (!conectado) return 'Sem conexão com o bridge. Espere reconectar para conferir.';
+  const aviso = 'A mesa precisa estar ligada no cabo USB para responder. ';
+  if (!statusMidi || statusMidi.simulado) return aviso + 'Agora o programa não encontra a mesa.';
+  if (statusMidi.entradaSimulada) return aviso + 'Agora o programa manda para a mesa, mas não escuta o que ela responde.';
+  return '';
+}
+
+/** "13", "13 e 14", "13, 14 e 15" */
+function juntarNumeros(lista) {
+  const n = [...lista].sort((a, b) => a - b);
+  if (n.length <= 1) return n.join('');
+  return n.slice(0, -1).join(', ') + ' e ' + n[n.length - 1];
+}
+
+/** Por que nao ha molde para criar os outros canais. */
+function motivoSemBase() {
+  const canalCalibrado = listaControles.some((c) => (c.type || 'canal') === 'canal' && c.calibrated);
+  return canalCalibrado
+    ? 'O canal calibrado não está no formato do manual da 01V96. Calibre os canais um a um.'
+    : 'Calibre um canal primeiro: ele vira o molde para criar os outros.';
+}
+
+function desenharGerar() {
+  const base = controleBase();
+
+  // Sem molde, o bloco fica compacto: so o titulo e o que falta.
+  elGerarConteudo.hidden = !base;
+  if (!base) {
+    elGerarExplica.textContent = motivoSemBase();
+    return;
+  }
+
+  const existentes = canaisQueJaExistem();
+  for (const n of existentes) gerar.marcados.delete(n);
+
+  elGerarExplica.textContent =
+    'Usa "' + base.label + '" (canal ' + base.canal + '), que já está calibrado, como molde. ' +
+    'Antes de criar, confere cada canal marcado com a mesa. Nada muda no som enquanto confere.';
+
+  // Grade: os 32 botoes nascem uma vez e so mudam de estado, para o foco do
+  // teclado nao se perder a cada toque.
+  if (elGerarGrade.childElementCount !== TOTAL_CANAIS) {
+    elGerarGrade.textContent = '';
+    for (let n = 1; n <= TOTAL_CANAIS; n++) {
+      const botao = document.createElement('button');
+      botao.type = 'button';
+      botao.className = 'opcoes__item grade__canal';
+      botao.dataset.canal = String(n);
+      botao.textContent = String(n);
+      elGerarGrade.appendChild(botao);
+    }
+  }
+  elGerarGrade.dataset.travada = gerar.ativo ? '1' : '0';
+  for (const botao of elGerarGrade.children) {
+    const n = Number(botao.dataset.canal);
+    const existe = existentes.has(n);
+    botao.classList.toggle('grade__canal--existe', existe);
+    botao.disabled = existe || gerar.ativo;
+    if (existe) {
+      botao.removeAttribute('aria-pressed');
+      botao.setAttribute('aria-label', 'Canal ' + n + ', já está no seu monitor');
+    } else {
+      botao.setAttribute('aria-pressed', gerar.marcados.has(n) ? 'true' : 'false');
+      botao.setAttribute('aria-label', 'Canal ' + n);
+    }
+  }
+
+  const qtd = gerar.marcados.size;
+  elGerarContagem.textContent = qtd === 0 ? 'nenhum marcado' : qtd === 1 ? '1 marcado' : qtd + ' marcados';
+
+  for (const atalho of elGerarAtalhos.querySelectorAll('button')) atalho.disabled = gerar.ativo;
+
+  // Progresso (o texto e aria-live; a barra e um progressbar de verdade)
+  elGerarProgresso.hidden = !gerar.ativo;
+  if (gerar.ativo) {
+    const texto = 'conferindo com a mesa: ' + gerar.feitos + ' de ' + gerar.total;
+    // So reescreve quando muda: o leitor de tela anuncia cada troca.
+    if (elGerarProgressoTexto.textContent !== texto) elGerarProgressoTexto.textContent = texto;
+    elGerarBarra.style.width = (gerar.total ? Math.round((gerar.feitos / gerar.total) * 100) : 0) + '%';
+    elGerarBarraTrilho.setAttribute('aria-valuemax', String(Math.max(1, gerar.total)));
+    elGerarBarraTrilho.setAttribute('aria-valuenow', String(gerar.feitos));
+    elGerarBarraTrilho.setAttribute('aria-valuetext', gerar.feitos + ' de ' + gerar.total + ' canais');
+  }
+
+  // Resultado da ultima conferencia
+  elGerarResumo.textContent = gerar.resumo;
+  elGerarResumo.hidden = !gerar.resumo;
+  elGerarErro.textContent = gerar.erro;
+  elGerarErro.hidden = !gerar.erro;
+
+  // Botao principal. O motivo e a descricao dele (aria-describedby): fica sem
+  // texto quando escondido, para nao ser lido a toa.
+  const motivo = motivoMesaIndisponivel();
+  const mostrarMotivo = !!motivo && !gerar.ativo;
+  elGerarMotivo.textContent = mostrarMotivo ? motivo : '';
+  elGerarMotivo.hidden = !mostrarMotivo;
+  elBtnGerar.disabled = gerar.ativo || !!motivo || qtd === 0;
+  elBtnGerar.textContent = gerar.ativo ? 'Conferindo com a mesa' : 'Conferir com a mesa e criar';
+}
+
+elGerarGrade.addEventListener('click', (ev) => {
+  const botao = ev.target.closest('[data-canal]');
+  if (!botao || botao.disabled || gerar.ativo) return;
+  const n = Number(botao.dataset.canal);
+  if (gerar.marcados.has(n)) gerar.marcados.delete(n);
+  else gerar.marcados.add(n);
+  desenharGerar();
+});
+
+elGerarAtalhos.addEventListener('click', (ev) => {
+  const botao = ev.target.closest('[data-faixa]');
+  if (!botao || gerar.ativo) return;
+
+  if (botao.dataset.faixa === 'limpar') {
+    gerar.marcados.clear();
+  } else {
+    // Marca a faixa toda; se ela ja estava toda marcada, desmarca.
+    const [de, ate] = botao.dataset.faixa.split('-').map(Number);
+    const existentes = canaisQueJaExistem();
+    const livres = [];
+    for (let n = de; n <= ate; n++) if (!existentes.has(n)) livres.push(n);
+    const todosMarcados = livres.length > 0 && livres.every((n) => gerar.marcados.has(n));
+    for (const n of livres) {
+      if (todosMarcados) gerar.marcados.delete(n);
+      else gerar.marcados.add(n);
+    }
+  }
+  desenharGerar();
+});
+
+elBtnGerar.addEventListener('click', () => {
+  const base = controleBase();
+  if (!base || gerar.ativo || !gerar.marcados.size || motivoMesaIndisponivel()) return;
+  if (!conectado) {
+    alert('Sem conexão com o bridge. Tente de novo quando reconectar.');
+    return;
+  }
+
+  const canais = [...gerar.marcados].sort((a, b) => a - b);
+  gerar.ativo = true;
+  gerar.enviados = canais;
+  gerar.feitos = 0;
+  gerar.total = canais.length;
+  gerar.resumo = '';
+  gerar.erro = '';
+  elGerarUltimo.textContent = '';
+  vigiarGerar();
+  enviar({ type: 'gerar:canais', base: base.id, canais });
+  desenharGerar();
+});
+
+/** Se o bridge parar de dar noticia, destrava em vez de deixar a tela presa. */
+function vigiarGerar() {
+  clearTimeout(gerar.vigia);
+  gerar.vigia = setTimeout(() => {
+    if (!gerar.ativo) return;
+    terminarGerar('', 'O bridge parou de dar notícia da conferência. ' +
+      'O que a mesa já confirmou fica salvo; confira a lista acima e marque de novo o que faltou.');
+  }, ESPERA_MAX_GERAR);
+}
+
+function terminarGerar(resumo, erro) {
+  clearTimeout(gerar.vigia);
+  gerar.vigia = null;
+  gerar.ativo = false;
+  gerar.resumo = resumo;
+  gerar.erro = erro;
+  desenharGerar();
+}
+
+/** Mensagens gerar:* vindas do bridge. */
+function receberDaGeracao(msg) {
+  if (msg.type === 'gerar:progresso') {
+    // gerar:* so chega para o celular que pediu. Progresso atrasado, depois de
+    // a vigia ou a queda ja terem destravado a tela, nao trava de novo.
+    if (!gerar.ativo) return;
+    gerar.feitos = Number(msg.feitos) || 0;
+    gerar.total = Number(msg.total) || gerar.total;
+    if (Number.isInteger(msg.canal)) {
+      elGerarUltimo.textContent = 'canal ' + msg.canal + ': ' +
+        (msg.confirmado ? 'a mesa respondeu' : 'a mesa não respondeu');
+    }
+    vigiarGerar();
+    desenharGerar();
+    return;
+  }
+
+  if (msg.type === 'gerar:fim') {
+    const criados = Array.isArray(msg.criados) ? msg.criados : [];
+    const semResposta = Array.isArray(msg.semResposta) ? msg.semResposta : [];
+    const jaExistiam = Array.isArray(msg.jaExistiam) ? msg.jaExistiam : [];
+
+    // Fica marcado so o que ainda falta: quem nao respondeu e, se a mesa sumiu
+    // no meio, quem nem chegou a ser conferido. Assim "tentar de novo" e um toque.
+    const resolvidos = new Set([...criados.map((c) => c.canal), ...jaExistiam]);
+    gerar.marcados = new Set(gerar.enviados.filter((n) => !resolvidos.has(n)));
+    for (const n of semResposta) gerar.marcados.add(n);
+
+    const qtd = criados.length;
+    let resumo = qtd === 0 ? 'Nenhum canal criado.' : qtd === 1 ? '1 canal criado.' : qtd + ' canais criados.';
+    if (jaExistiam.length) {
+      resumo += jaExistiam.length === 1
+        ? ' O canal ' + jaExistiam[0] + ' já existia.'
+        : ' Os canais ' + juntarNumeros(jaExistiam) + ' já existiam.';
+    }
+
+    const problemas = [];
+    if (msg.interrompido) {
+      problemas.push('A mesa sumiu no meio da conferência. O que ela confirmou ficou salvo; ' +
+        'os que faltaram continuam marcados para tentar de novo quando ela voltar.');
+    }
+    if (semResposta.length) {
+      problemas.push(semResposta.length === 1
+        ? 'A mesa não respondeu o canal ' + semResposta[0] + ', ele não foi criado.'
+        : 'A mesa não respondeu os canais ' + juntarNumeros(semResposta) + ', eles não foram criados.');
+      if (!msg.interrompido) {
+        problemas.push(semResposta.length === 1
+          ? 'Ele continua marcado para tentar de novo.'
+          : 'Eles continuam marcados para tentar de novo.');
+      }
+    }
+
+    terminarGerar(resumo, problemas.join(' '));
+    return;
+  }
+
+  if (msg.type === 'gerar:erro') {
+    terminarGerar('', msg.message || 'Não consegui criar os canais.');
   }
 }
 
@@ -488,6 +863,7 @@ elBtnAjustes.addEventListener('click', () => {
   }
   desenharListaAjustes();
   desenharEstadoDaMesa();
+  desenharGerar();
   enviar({ type: 'midi:portas' });
   elAjustes.showModal();
 });
@@ -748,7 +1124,12 @@ function receberDoAssistente(msg) {
   }
 
   if (msg.type === 'learn:erro') {
-    if (assistente.etapa === 'salvando') {
+    if (msg.etapa === 'nome') {
+      // O bridge recusou comecar (ex.: criando canais agora). Sem isto o
+      // assistente ficaria no passo do minimo com um "Capturei" que nao faz nada.
+      assistente.etapa = 'nome';
+      desenharEtapa();
+    } else if (assistente.etapa === 'salvando') {
       assistente.etapa = 'min';
       desenharEtapa();
     }

@@ -213,6 +213,97 @@ function compararFrames(frameMin, frameMax) {
   return { valueOffset: inicio, valueLength: tamanho, rawMin, rawMax, avisos };
 }
 
+// ---------------------------------------------------------------------------
+// Formato do manual (01V96 V2, Appendix C, p.313-314)
+//
+//   Parameter change:  F0 43 1n 3E 0D|7F tt ee pp cc dd.. F7
+//   Parameter request: F0 43 3n 3E 0D|7F tt ee pp cc F7
+//
+// n = device number, cc = numero do canal. O manual NAO traz a tabela de
+// enderecos (tt ee pp), entao eles continuam vindo da calibracao. Daqui so se
+// usa o que o manual garante: onde fica o byte do canal e como pedir o valor
+// atual de um endereco sem mudar nada na mesa.
+// Suposicao a conferir na mesa: canal 1 = cc 0x00, ate o canal 32 = 0x1F.
+// ---------------------------------------------------------------------------
+
+const TOTAL_CANAIS = 32;
+const POSICAO_CANAL = 8;
+
+/**
+ * Canal (1 a 32) de um controle calibrado no formato do manual. Devolve null
+ * se o molde nao tem esse formato, ou se o valor nao mora depois do byte do
+ * canal: nesses casos nao da para trocar so o canal com seguranca.
+ */
+function canalDoControle(controle) {
+  if (!estaCalibrado(controle)) return null;
+  const t = controle.template;
+  if (t.length < 11) return null;
+  if (t[0] !== INICIO_SYSEX || t[t.length - 1] !== FIM_SYSEX) return null;
+  if (t[1] !== 0x43 || (t[2] & 0xf0) !== 0x10 || t[3] !== 0x3e) return null;
+  if (t[4] !== 0x0d && t[4] !== 0x7f) return null;
+  for (let i = 5; i <= POSICAO_CANAL; i++) {
+    if (!Number.isInteger(t[i]) || t[i] < 0 || t[i] > 0x7f) return null;
+  }
+  if (controle.valueOffset <= POSICAO_CANAL) return null;
+  if (controle.valueOffset + controle.valueLength > t.length - 1) return null;
+  if (t[POSICAO_CANAL] > TOTAL_CANAIS - 1) return null;
+  return t[POSICAO_CANAL] + 1;
+}
+
+function exigirCanal(controle, canal) {
+  if (canalDoControle(controle) === null) {
+    throw new Error('Controle "' + (controle && controle.id) + '" nao esta no formato do manual da 01V96');
+  }
+  if (!Number.isInteger(canal) || canal < 1 || canal > TOTAL_CANAIS) {
+    throw new Error('Canal fora de 1 a ' + TOTAL_CANAIS + ': ' + canal);
+  }
+}
+
+/**
+ * O mesmo controle, mas em outro canal: copia a calibracao e troca so o byte
+ * do canal. Leva apenas os campos de calibracao (id, rotulo e tipo sao de
+ * quem chama).
+ */
+function controleParaCanal(controle, canal) {
+  exigirCanal(controle, canal);
+  const template = controle.template.slice();
+  template[POSICAO_CANAL] = canal - 1;
+  return {
+    calibrado: true,
+    template,
+    valueOffset: controle.valueOffset,
+    valueLength: controle.valueLength,
+    rawMin: controle.rawMin,
+    rawMax: controle.rawMax
+  };
+}
+
+/**
+ * Parameter request do endereco do controle naquele canal. A mesa responde
+ * com um Parameter change do mesmo endereco trazendo o valor atual; pedir
+ * nunca muda nada no som.
+ */
+function montarPedido(controle, canal) {
+  exigirCanal(controle, canal);
+  const t = controle.template;
+  return [INICIO_SYSEX, 0x43, 0x30 | (t[2] & 0x0f), t[3], t[4], t[5], t[6], t[7], canal - 1, FIM_SYSEX];
+}
+
+/** true se os dois controles apontam para o mesmo endereco (so o valor pode mudar). */
+function mesmoEndereco(a, b) {
+  if (!estaCalibrado(a) || !estaCalibrado(b)) return false;
+  if (a.template.length !== b.template.length) return false;
+  if (a.valueOffset !== b.valueOffset || a.valueLength !== b.valueLength) return false;
+
+  const ini = a.valueOffset;
+  const fim = ini + a.valueLength;
+  for (let i = 0; i < a.template.length; i++) {
+    if (i >= ini && i < fim) continue;
+    if (a.template[i] !== b.template[i]) return false;
+  }
+  return true;
+}
+
 /** Monta o objeto de controle calibrado que vai para o config.json. */
 function criarControle({ id, rotulo, tipo, valorInicial, frameMin, frameMax }) {
   const diff = compararFrames(frameMin, frameMax);
@@ -249,5 +340,10 @@ module.exports = {
   montarFrame,
   lerValorDoFrame,
   compararFrames,
-  criarControle
+  criarControle,
+  TOTAL_CANAIS,
+  canalDoControle,
+  controleParaCanal,
+  montarPedido,
+  mesmoEndereco
 };

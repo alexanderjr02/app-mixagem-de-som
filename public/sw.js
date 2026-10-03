@@ -8,7 +8,8 @@
  * copia. Nada de /api e nada de WebSocket passa por aqui.
  */
 
-const CACHE = 'monitor-01v96-v1';
+// Suba a versao a cada mudanca no app: o celular troca a copia guardada.
+const CACHE = 'monitor-01v96-v2';
 
 const ARQUIVOS = [
   './',
