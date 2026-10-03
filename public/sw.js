@@ -9,7 +9,7 @@
  */
 
 // Suba a versao a cada mudanca no app: o celular troca a copia guardada.
-const CACHE = 'monitor-01v96-v2';
+const CACHE = 'monitor-01v96-v3';
 
 const ARQUIVOS = [
   './',

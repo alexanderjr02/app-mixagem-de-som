@@ -220,11 +220,30 @@ function portaSaidaReal(porta, nome, virtual = false) {
 }
 
 /**
+ * O que vindo da mesa interessa ao programa. SysEx (F0 ... F7) sempre.
+ * Program Change (Cn pp, 2 bytes) so quando pedido: e assim que a mesa avisa
+ * que chamaram uma cena. Relogio, note on e o resto ficam de fora.
+ */
+function mensagemQueServe(mensagem, opcoes = {}) {
+  if (!mensagem || mensagem.length < 2) return false;
+  if (mensagem.length > 2 && mensagem[0] === 0xf0) return true;
+  return (
+    opcoes.programChange === true &&
+    mensagem.length === 2 &&
+    mensagem[0] >= 0xc0 &&
+    mensagem[0] <= 0xcf &&
+    mensagem[1] <= 0x7f
+  );
+}
+
+/**
  * Abre a porta de entrada (o caminho mesa -> bridge), usada para calibrar e
  * para acompanhar quando alguem mexe nos controles direto na mesa.
- * aoReceber recebe um array de bytes de cada mensagem SysEx.
+ * aoReceber recebe um array de bytes de cada mensagem SysEx e, com
+ * opcoes.programChange, tambem de cada Program Change (troca de cena).
+ * Sem a opcao (calibracao e monitor pelo terminal), continua so SysEx.
  */
-function abrirEntrada(spec, aoReceber) {
+function abrirEntrada(spec, aoReceber, opcoes = {}) {
   const vazia = (motivo) => ({ nome: 'simulado', simulado: true, motivo, sumiu: () => false, fechar() {} });
 
   if (!midi) return vazia('pacote MIDI nao instalado: ' + mensagemErroMidi());
@@ -234,13 +253,11 @@ function abrirEntrada(spec, aoReceber) {
 
   try {
     porta.on('message', (_deltaTime, mensagem) => {
-      // So interessa SysEx (F0 ... F7). Relogio e note on nao servem aqui.
-      if (mensagem.length > 2 && mensagem[0] === 0xf0) {
-        try {
-          aoReceber(Array.from(mensagem));
-        } catch (erro) {
-          console.error('[midi] erro tratando SysEx recebido:', erro.message);
-        }
+      if (!mensagemQueServe(mensagem, opcoes)) return;
+      try {
+        aoReceber(Array.from(mensagem));
+      } catch (erro) {
+        console.error('[midi] erro tratando mensagem recebida:', erro.message);
       }
     });
 
@@ -291,6 +308,7 @@ module.exports = {
   listarPortas,
   escolherAutomatica,
   aindaNaLista,
+  mensagemQueServe,
   abrirSaida,
   abrirEntrada
 };

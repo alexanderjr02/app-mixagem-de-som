@@ -230,22 +230,33 @@ const TOTAL_CANAIS = 32;
 const POSICAO_CANAL = 8;
 
 /**
+ * O molde e um Parameter change no formato do manual (F0 43 1n 3E 0D|7F tt ee
+ * pp cc dd.. F7), com o valor morando depois do byte cc? So assim da para
+ * montar outro quadro do mesmo endereco sem chutar byte nenhum.
+ */
+function noFormatoDoManual(controle) {
+  if (!estaCalibrado(controle)) return false;
+  const t = controle.template;
+  if (t.length < 11) return false;
+  if (t[0] !== INICIO_SYSEX || t[t.length - 1] !== FIM_SYSEX) return false;
+  if (t[1] !== 0x43 || (t[2] & 0xf0) !== 0x10 || t[3] !== 0x3e) return false;
+  if (t[4] !== 0x0d && t[4] !== 0x7f) return false;
+  for (let i = 5; i <= POSICAO_CANAL; i++) {
+    if (!Number.isInteger(t[i]) || t[i] < 0 || t[i] > 0x7f) return false;
+  }
+  if (controle.valueOffset <= POSICAO_CANAL) return false;
+  if (controle.valueOffset + controle.valueLength > t.length - 1) return false;
+  return true;
+}
+
+/**
  * Canal (1 a 32) de um controle calibrado no formato do manual. Devolve null
  * se o molde nao tem esse formato, ou se o valor nao mora depois do byte do
  * canal: nesses casos nao da para trocar so o canal com seguranca.
  */
 function canalDoControle(controle) {
-  if (!estaCalibrado(controle)) return null;
+  if (!noFormatoDoManual(controle)) return null;
   const t = controle.template;
-  if (t.length < 11) return null;
-  if (t[0] !== INICIO_SYSEX || t[t.length - 1] !== FIM_SYSEX) return null;
-  if (t[1] !== 0x43 || (t[2] & 0xf0) !== 0x10 || t[3] !== 0x3e) return null;
-  if (t[4] !== 0x0d && t[4] !== 0x7f) return null;
-  for (let i = 5; i <= POSICAO_CANAL; i++) {
-    if (!Number.isInteger(t[i]) || t[i] < 0 || t[i] > 0x7f) return null;
-  }
-  if (controle.valueOffset <= POSICAO_CANAL) return null;
-  if (controle.valueOffset + controle.valueLength > t.length - 1) return null;
   if (t[POSICAO_CANAL] > TOTAL_CANAIS - 1) return null;
   return t[POSICAO_CANAL] + 1;
 }
@@ -287,6 +298,69 @@ function montarPedido(controle, canal) {
   exigirCanal(controle, canal);
   const t = controle.template;
   return [INICIO_SYSEX, 0x43, 0x30 | (t[2] & 0x0f), t[3], t[4], t[5], t[6], t[7], canal - 1, FIM_SYSEX];
+}
+
+/**
+ * Parameter request do PROPRIO endereco do controle (qualquer tipo: canal,
+ * reverb ou volume geral), para reler o valor atual sem mudar nada no som.
+ * Devolve null se o molde nao esta no formato do manual: ai nao ha como
+ * pedir com seguranca, e o controle simplesmente nao e relido.
+ */
+function montarPedidoDoControle(controle) {
+  if (!noFormatoDoManual(controle)) return null;
+  const t = controle.template;
+  return [INICIO_SYSEX, 0x43, 0x30 | (t[2] & 0x0f), t[3], t[4], t[5], t[6], t[7], t[POSICAO_CANAL], FIM_SYSEX];
+}
+
+// ---------------------------------------------------------------------------
+// Cenas (01V96 V2: p.209, p.219-220, p.289, p.307, p.314-315)
+//
+// Ao chamar uma cena, com PROGRAM CHANGE Tx ON, a mesa manda Program Change
+// "Cn pp" no Tx CH. Tabela de fabrica: programa #1 a #99 = cenas 01 a 99 e
+// #100 = cena 00. O byte pp vai de 0 a 127; aqui se supoe byte = # - 1
+// (HIPOTESE, conferir na mesa pelo "bruto" no diagnostico do app).
+//
+// Quando o Program Change nao vale para a cena, a mesa manda o SysEx de funcao
+// SCENE RECALL: F0 43 1n 3E 7F 10 01 mh ml ch cl F7, cena = mh*128 + ml.
+// ---------------------------------------------------------------------------
+
+const TOTAL_CENAS = 100; // 00 a 99
+
+/** { numero, bruto } da cena chamada, pela tabela de fabrica, ou null. */
+function cenaDoProgramChange(bytes) {
+  if (!bytes || bytes.length !== 2) return null;
+  const status = bytes[0];
+  const programa = bytes[1];
+  if (!Number.isInteger(status) || status < 0xc0 || status > 0xcf) return null;
+  if (!Number.isInteger(programa) || programa < 0 || programa > 0x7f) return null;
+
+  let numero;
+  if (programa <= 98) numero = programa + 1; // #1..#99 = cenas 01..99
+  else if (programa === 99) numero = 0; // #100 = cena 00
+  else return null; // #101..#128 nao tem cena na tabela de fabrica
+  return { numero, bruto: paraHex(bytes) };
+}
+
+// F0 43 1n 3E 7F 10 01: o byte 2 (1n) leva o device number e e conferido a parte.
+const CABECALHO_RECALL = [INICIO_SYSEX, 0x43, null, 0x3e, 0x7f, 0x10, 0x01];
+const TAMANHO_RECALL = 12;
+
+/** Comeca como o SysEx de funcao SCENE RECALL (tamanho e numero nao conferidos). */
+function pareceRecallDeCena(bytes) {
+  if (!bytes || bytes.length < CABECALHO_RECALL.length) return false;
+  if (!Number.isInteger(bytes[2]) || bytes[2] < 0x10 || bytes[2] > 0x1f) return false;
+  return CABECALHO_RECALL.every((b, i) => b === null || bytes[i] === b);
+}
+
+/** Numero (0 a 99) da cena do SysEx de funcao SCENE RECALL, ou null. */
+function cenaDoSysex(bytes) {
+  if (!pareceRecallDeCena(bytes) || bytes.length !== TAMANHO_RECALL) return null;
+  if (bytes[TAMANHO_RECALL - 1] !== FIM_SYSEX) return null;
+  for (let i = CABECALHO_RECALL.length; i < TAMANHO_RECALL - 1; i++) {
+    if (!Number.isInteger(bytes[i]) || bytes[i] < 0 || bytes[i] > 0x7f) return null;
+  }
+  const numero = bytes[7] * 128 + bytes[8];
+  return numero < TOTAL_CENAS ? numero : null;
 }
 
 /** true se os dois controles apontam para o mesmo endereco (so o valor pode mudar). */
@@ -345,5 +419,10 @@ module.exports = {
   canalDoControle,
   controleParaCanal,
   montarPedido,
-  mesmoEndereco
+  montarPedidoDoControle,
+  mesmoEndereco,
+  TOTAL_CENAS,
+  cenaDoProgramChange,
+  pareceRecallDeCena,
+  cenaDoSysex
 };

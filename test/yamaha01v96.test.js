@@ -296,3 +296,113 @@ test('mesmoEndereco compara tudo menos a janela do valor', () => {
   assert.equal(mesa.mesmoEndereco(base, { ...base, calibrado: false }), false);
   assert.equal(mesa.mesmoEndereco(null, base), false);
 });
+
+// ---------------------------------------------------------------------------
+// Releitura depois da troca de cena (Parameter request do proprio controle)
+// ---------------------------------------------------------------------------
+
+test('montarPedidoDoControle pede o proprio endereco do controle, sem valor (3n)', () => {
+  // O mesmo pedido que a criacao de canais usaria para o canal do controle.
+  assert.deepEqual(mesa.montarPedidoDoControle(bumbo()), [0xf0, 0x43, 0x30, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0xf7]);
+  assert.deepEqual(mesa.montarPedidoDoControle(bumbo()), mesa.montarPedido(bumbo(), 1));
+  assert.deepEqual(mesa.montarPedidoDoControle(comTemplate({ 8: 0x04 })), mesa.montarPedido(bumbo(), 5));
+  // Device number e o 7F do byte 4 vem do molde calibrado.
+  assert.deepEqual(
+    mesa.montarPedidoDoControle(comTemplate({ 2: 0x1a, 4: 0x7f })),
+    [0xf0, 0x43, 0x3a, 0x3e, 0x7f, 0x01, 0x1c, 0x00, 0x00, 0xf7]
+  );
+});
+
+test('montarPedidoDoControle vale para qualquer tipo, mesmo sem canal de 1 a 32', () => {
+  // Volume geral do Aux, por exemplo: cc fora de 0..31 nao serve de modelo de
+  // canal, mas o endereco esta no formato do manual e da para reler.
+  const master = comTemplate({ 6: 0x20, 8: 0x40 }, { id: 'master', tipo: 'master' });
+  assert.equal(mesa.canalDoControle(master), null);
+  assert.deepEqual(mesa.montarPedidoDoControle(master), [0xf0, 0x43, 0x30, 0x3e, 0x0d, 0x01, 0x20, 0x00, 0x40, 0xf7]);
+  const reverb = comTemplate({ 6: 0x1d }, { id: 'reverb', tipo: 'reverb' });
+  assert.deepEqual(mesa.montarPedidoDoControle(reverb), [0xf0, 0x43, 0x30, 0x3e, 0x0d, 0x01, 0x1d, 0x00, 0x00, 0xf7]);
+});
+
+test('montarPedidoDoControle devolve null fora do formato do manual', () => {
+  assert.equal(mesa.montarPedidoDoControle(null), null);
+  assert.equal(mesa.montarPedidoDoControle({ ...bumbo(), calibrado: false }), null);
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 4: 0x0e })), null, 'byte 4 fora de 0D/7F');
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 3: 0x3f })), null, 'outro modelo de mesa');
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 1: 0x41 })), null, 'outro fabricante');
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 2: 0x30 })), null, 'quadro de pedido, nao de mudanca');
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 7: 0x80 })), null, 'byte de endereco invalido');
+  assert.equal(mesa.montarPedidoDoControle({ ...bumbo(), valueOffset: 8 }), null, 'valor antes do byte 9');
+  assert.equal(mesa.montarPedidoDoControle({ ...bumbo(), valueOffset: 10, valueLength: 2 }), null, 'valor encosta no F7');
+  const curto = [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0xf7];
+  assert.equal(mesa.montarPedidoDoControle({ ...bumbo(), template: curto, valueOffset: 8, valueLength: 1 }), null);
+});
+
+test('a resposta da mesa ao pedido e lida pelo molde do proprio controle', () => {
+  const base = bumbo();
+  const pedido = mesa.montarPedidoDoControle(base);
+  // Como a mesa responde: Parameter change (1n) do mesmo endereco, com o valor.
+  const resposta = [0xf0, 0x43, 0x10 | (pedido[2] & 0x0f), ...pedido.slice(3, 9), 0x00, 0x40, 0xf7];
+  assert.equal(mesa.lerValorDoFrame(base, resposta), 64);
+  // A resposta de outro controle nunca casa com este.
+  assert.equal(mesa.lerValorDoFrame(comTemplate({ 8: 0x01 }), resposta), null);
+});
+
+// ---------------------------------------------------------------------------
+// Cenas: Program Change pela tabela de fabrica e SysEx de funcao SCENE RECALL
+// ---------------------------------------------------------------------------
+
+test('cenaDoProgramChange segue a tabela de fabrica (byte = programa - 1)', () => {
+  assert.deepEqual(mesa.cenaDoProgramChange([0xc0, 0]), { numero: 1, bruto: 'C0 00' });
+  assert.deepEqual(mesa.cenaDoProgramChange([0xc0, 2]), { numero: 3, bruto: 'C0 02' });
+  assert.deepEqual(mesa.cenaDoProgramChange([0xc0, 98]), { numero: 99, bruto: 'C0 62' });
+  assert.deepEqual(mesa.cenaDoProgramChange([0xc0, 99]), { numero: 0, bruto: 'C0 63' }, '#100 = cena 00');
+  for (const b of [100, 101, 127]) assert.equal(mesa.cenaDoProgramChange([0xc0, b]), null, 'byte ' + b);
+  // Qualquer Tx CH (Cn).
+  assert.deepEqual(mesa.cenaDoProgramChange([0xcf, 4]), { numero: 5, bruto: 'CF 04' });
+});
+
+test('cenaDoProgramChange recusa o que nao e Program Change', () => {
+  for (const bytes of [
+    null, undefined, [], [0xc0], [0xc0, 2, 0], [0xb0, 2], [0xd0, 2], [0xc0, 128], [0xc0, -1],
+    [0xc0, 1.5], [0x1c0, 2], [0xf0, 0x43, 0xf7]
+  ]) {
+    assert.equal(mesa.cenaDoProgramChange(bytes), null, JSON.stringify(bytes));
+  }
+});
+
+const RECALL = (mh, ml, n = 0) => [0xf0, 0x43, 0x10 | n, 0x3e, 0x7f, 0x10, 0x01, mh, ml, 0x00, 0x00, 0xf7];
+
+test('cenaDoSysex le o numero do SCENE RECALL (mh*128 + ml, 0 a 99)', () => {
+  assert.equal(mesa.cenaDoSysex(RECALL(0, 0)), 0);
+  assert.equal(mesa.cenaDoSysex(RECALL(0, 3)), 3);
+  assert.equal(mesa.cenaDoSysex(RECALL(0, 99)), 99);
+  assert.equal(mesa.cenaDoSysex(RECALL(0, 5, 0x0f)), 5, 'qualquer device number');
+  assert.equal(mesa.cenaDoSysex(RECALL(0, 100)), null, 'cena 100 nao existe');
+  assert.equal(mesa.cenaDoSysex(RECALL(1, 0)), null, '128');
+});
+
+test('cenaDoSysex confere cabecalho, tamanho e F7', () => {
+  const ok = RECALL(0, 3);
+  const com = (i, b) => ok.map((x, j) => (j === i ? b : x));
+  assert.equal(mesa.cenaDoSysex(com(1, 0x41)), null, 'outro fabricante');
+  assert.equal(mesa.cenaDoSysex(com(2, 0x30)), null, 'pedido (3n), nao mensagem da mesa');
+  assert.equal(mesa.cenaDoSysex(com(3, 0x3f)), null, 'outro modelo');
+  assert.equal(mesa.cenaDoSysex(com(4, 0x0d)), null, 'nao e funcao');
+  assert.equal(mesa.cenaDoSysex(com(6, 0x02)), null, 'outra funcao');
+  assert.equal(mesa.cenaDoSysex(com(9, 0x80)), null, 'byte de dados invalido');
+  assert.equal(mesa.cenaDoSysex(com(11, 0xf0)), null, 'sem F7');
+  assert.equal(mesa.cenaDoSysex([...ok.slice(0, 10), 0xf7]), null, 'curto');
+  assert.equal(mesa.cenaDoSysex([...ok.slice(0, 11), 0x00, 0xf7]), null, 'comprido');
+  assert.equal(mesa.cenaDoSysex(null), null);
+  // Um Parameter change de controle nunca e tomado por cena.
+  assert.equal(mesa.cenaDoSysex(MINIMO), null);
+  assert.equal(mesa.pareceRecallDeCena(MINIMO), false);
+});
+
+test('pareceRecallDeCena reconhece o cabecalho mesmo com tamanho ou numero estranho', () => {
+  assert.equal(mesa.pareceRecallDeCena(RECALL(0, 3)), true);
+  assert.equal(mesa.pareceRecallDeCena(RECALL(1, 0)), true);
+  assert.equal(mesa.pareceRecallDeCena([0xf0, 0x43, 0x10, 0x3e, 0x7f, 0x10, 0x01, 0xf7]), true);
+  assert.equal(mesa.pareceRecallDeCena([0xf0, 0x43, 0x30, 0x3e, 0x7f, 0x10, 0x01, 0x00, 0xf7]), false);
+  assert.equal(mesa.pareceRecallDeCena([0xc0, 0x02]), false);
+});

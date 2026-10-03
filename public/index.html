@@ -27,6 +27,15 @@
       </svg>
       <span class="marca__texto">Monitor</span>
       <span class="marca__sub">01V96</span>
+
+      <!-- Cena que a equipe de som carregou na mesa. A mesa so diz o numero;
+           o nome vem do app. Sem espaco, encurta para "C3" (o leitor de tela
+           continua lendo "Cena 3"). -->
+      <span class="cena" id="cena" hidden>
+        <span class="cena__numero"><span class="cena__palavra">Cena </span><span class="cena__letra" aria-hidden="true">C</span><span id="cenaNumero"></span></span>
+        <span class="cena__ponto" id="cenaPonto" aria-hidden="true">·</span>
+        <span class="cena__nome" id="cenaNome"></span>
+      </span>
     </div>
 
     <div class="topo__acoes">
@@ -66,6 +75,9 @@
 
   <footer class="rodape">
     <span class="rodape__texto" id="rodape">procurando o bridge</span>
+    <!-- Aviso passageiro (troca de cena). Vazio, nao ocupa nada; com texto,
+         toma o lugar do rodape por alguns segundos. -->
+    <span class="rodape__aviso" id="rodapeAviso" role="status"></span>
   </footer>
 
   <!-- Ajustes: a lista de controles do meu fone -->
@@ -132,6 +144,13 @@
               Toque no nome na lista para renomear.
             </p>
           </div>
+        </section>
+
+        <!-- A mesa so manda o numero da cena; o nome vale para todos os celulares. -->
+        <section class="bloco" id="blocoCenas">
+          <h3 class="bloco__titulo">Cenas da mesa</h3>
+          <p class="bloco__texto" id="cenasExplica"></p>
+          <ul class="lista" id="listaCenas" hidden></ul>
         </section>
 
         <button class="botao botao--fantasma botao--largo" id="btnDiagnostico" type="button">

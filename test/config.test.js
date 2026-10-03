@@ -124,3 +124,17 @@ test('salvar e salvarEstado gravam por arquivo temporario: nunca deixam .tmp nem
   assert.equal(JSON.parse(fs.readFileSync(config.CAMINHO_CONFIG, 'utf8')).servidor.porta, 8123);
   assert.deepEqual(config.carregarEstado().valores, { a: 1 });
 });
+
+test('a ultima cena vista volta junto com o mix do estado.json', () => {
+  const cena = { atual: { numero: 3, em: '2026-10-05T10:00:00.000Z', origem: 'programa', bruto: 'C0 02' }, vistas: [1, 3] };
+  config.salvarEstado({ valores: { bumbo: 0.7 }, mutes: {}, cena });
+  assert.deepEqual(config.carregarEstado(), { valores: { bumbo: 0.7 }, mutes: {}, cena });
+});
+
+test('os nomes das cenas no config.json sobrevivem a qualquer gravacao', () => {
+  escreverConfig({ controles: [], cenas: { 3: 'Pedro' } });
+  const cfg = config.carregar();
+  cfg.aplicarEstadoAoIniciar = true;
+  config.salvar(cfg);
+  assert.deepEqual(config.carregar().cenas, { 3: 'Pedro' });
+});

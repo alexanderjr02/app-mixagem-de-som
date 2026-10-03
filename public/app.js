@@ -342,7 +342,14 @@ function conectar() {
         receberDaGeracao(msg);
         break;
       case 'controle:erro':
+        // Tambem chega aqui o erro de dar nome a uma cena.
         alert(msg.message || 'Não consegui mudar esse controle.');
+        break;
+      case 'cena':
+        receberCena(msg);
+        break;
+      case 'cena:relida':
+        receberRelida(msg);
         break;
       default:
         if (msg.type && msg.type.startsWith('learn:')) receberDoAssistente(msg);
@@ -355,6 +362,10 @@ function conectar() {
     const caiuAgora = conectado;
     conectado = false;
     definirConexao('offline', 'reconectando');
+    // Sem bridge a cena pode mudar sem a gente saber: o rotulo some ate o
+    // bridge contar de novo, logo que reconectar.
+    limparAviso();
+    desenharCena();
     atualizarRodape();
     atualizarVazio();
     atualizarBotaoAjustes();
@@ -864,9 +875,326 @@ elBtnAjustes.addEventListener('click', () => {
   desenharListaAjustes();
   desenharEstadoDaMesa();
   desenharGerar();
+  desenharCenas();
   enviar({ type: 'midi:portas' });
   elAjustes.showModal();
 });
+
+/* ---- cena da mesa ------------------------------------------------------
+   Cada tecnico tem a sua cena, e a cena tambem muda os fones. A mesa so conta
+   o numero (0 a 99); o nome e dado aqui e vale para todos os celulares.    */
+
+const NOME_CENA_MAX = 30;
+const AVISO_TROCA_MS = 6000;
+const AVISO_RELIDA_MS = 5000;
+
+const elTopo = document.querySelector('.topo');
+const elCena = document.getElementById('cena');
+const elCenaNumero = document.getElementById('cenaNumero');
+const elCenaPonto = document.getElementById('cenaPonto');
+const elCenaNome = document.getElementById('cenaNome');
+const elRodapeBarra = elRodape.parentElement;
+const elRodapeAviso = document.getElementById('rodapeAviso');
+const elCenasExplica = document.getElementById('cenasExplica');
+const elListaCenas = document.getElementById('listaCenas');
+
+const cena = {
+  conhecida: false, // ja chegou alguma mensagem 'cena' desde que a pagina abriu
+  atual: null,      // { numero, nome, em, origem, bruto } ou null
+  nomes: new Map(), // numero -> nome
+  vistas: []        // numeros em ordem
+};
+
+/** 0..99, vindo como numero ou como chave de objeto ("3"); senao null. */
+function numeroDeCena(valor) {
+  const n = typeof valor === 'string' && /^\d{1,2}$/.test(valor.trim()) ? Number(valor) : valor;
+  return Number.isInteger(n) && n >= 0 && n <= 99 ? n : null;
+}
+
+function nomeDaCena(numero) {
+  return cena.nomes.get(numero) || '';
+}
+
+/** "Cena 3 · Pedro" ou "Cena 3". */
+function rotuloDaCena(numero) {
+  const nome = nomeDaCena(numero);
+  return 'Cena ' + numero + (nome ? ' · ' + nome : '');
+}
+
+function receberCena(msg) {
+  const antes = cena.atual ? cena.atual.numero : null;
+  const jaConhecida = cena.conhecida;
+
+  const nomes = new Map();
+  if (msg.nomes && typeof msg.nomes === 'object') {
+    for (const [chave, nome] of Object.entries(msg.nomes)) {
+      const n = numeroDeCena(chave);
+      const texto = typeof nome === 'string' ? nome.trim() : '';
+      if (n !== null && texto) nomes.set(n, texto);
+    }
+  }
+
+  const vistas = new Set();
+  if (Array.isArray(msg.vistas)) {
+    for (const v of msg.vistas) {
+      const n = numeroDeCena(v);
+      if (n !== null) vistas.add(n);
+    }
+  }
+
+  const atual = msg.atual && typeof msg.atual === 'object' ? msg.atual : null;
+  const numero = atual ? numeroDeCena(atual.numero) : null;
+  if (numero !== null) {
+    vistas.add(numero);
+    const nomeAtual = typeof atual.nome === 'string' ? atual.nome.trim() : '';
+    if (nomeAtual && !nomes.has(numero)) nomes.set(numero, nomeAtual);
+  }
+
+  cena.atual = numero === null ? null : { ...atual, numero };
+  cena.nomes = nomes;
+  cena.vistas = [...vistas].sort((a, b) => a - b);
+  cena.conhecida = true;
+
+  desenharCena();
+  if (elAjustes.open) desenharCenas();
+
+  // A primeira mensagem depois de abrir o app so conta onde a mesa esta; nao
+  // e troca. Dar nome tambem chega aqui, com o mesmo numero: nao avisa.
+  // Cena desconhecida de novo: o aviso da troca anterior ja nao vale.
+  if (numero === null) limparAviso();
+  else if (jaConhecida && numero !== antes) avisarTrocaDeCena();
+}
+
+function receberRelida(msg) {
+  // Releitura de uma cena que ja saiu da mesa (troca rapida): a da cena nova
+  // vem logo em seguida.
+  const numero = numeroDeCena(msg.numero);
+  if (cena.atual && numero !== null && numero !== cena.atual.numero) return;
+
+  const lidos = contar(msg.lidos);
+  const semResposta = contar(msg.semResposta);
+  if (!lidos && !semResposta) return; // nada calibrado para reler
+
+  let texto;
+  if (!lidos) {
+    texto = 'a mesa não respondeu ao reler os faders';
+  } else {
+    texto = 'faders atualizados pela mesa';
+    if (semResposta) {
+      texto += semResposta === 1 ? ' (1 não respondeu)' : ' (' + semResposta + ' não responderam)';
+    }
+  }
+  avisarNoRodape(texto, AVISO_RELIDA_MS);
+}
+
+/** Aceita lista ou quantidade. */
+function contar(valor) {
+  if (Array.isArray(valor)) return valor.length;
+  const n = Number(valor);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function desenharCena() {
+  const atual = conectado ? cena.atual : null;
+  elCena.hidden = !atual;
+  if (!atual) {
+    delete elTopo.dataset.cena;
+    return;
+  }
+
+  const nome = nomeDaCena(atual.numero);
+  elCenaNumero.textContent = String(atual.numero);
+  elCenaNome.textContent = nome;
+  elCenaNome.hidden = !nome;
+  elCenaPonto.hidden = !nome;
+  encaixarCena();
+}
+
+/**
+ * O topo nao pode quebrar em 360px. Tenta a forma inteira; sem espaco, tira o
+ * "01V96" da marca; ainda sem espaco, "Cena 3" vira "C3". O nome so corta com
+ * reticencias se nem assim couber.
+ */
+function encaixarCena() {
+  if (elCena.hidden) return;
+  for (const forma of ['longa', 'compacta', 'curta']) {
+    elTopo.dataset.cena = forma;
+    if (!cenaTransborda()) return;
+  }
+}
+
+function cenaTransborda() {
+  return elCena.scrollWidth > elCena.clientWidth + 1 ||
+    (!elCenaNome.hidden && elCenaNome.scrollWidth > elCenaNome.clientWidth + 1);
+}
+
+window.addEventListener('resize', encaixarCena);
+
+function avisarTrocaDeCena() {
+  // Tirar e por a classe de novo reinicia o pulso a cada troca.
+  elCena.classList.remove('cena--trocou');
+  void elCena.offsetWidth;
+  elCena.classList.add('cena--trocou');
+  avisarNoRodape('a mesa trocou para a ' + rotuloDaCena(cena.atual.numero), AVISO_TROCA_MS);
+}
+
+elCena.addEventListener('animationend', () => elCena.classList.remove('cena--trocou'));
+
+let timerAviso = null;
+
+function avisarNoRodape(texto, ms) {
+  clearTimeout(timerAviso);
+  elRodapeAviso.textContent = texto;
+  elRodapeBarra.dataset.aviso = '1';
+  timerAviso = setTimeout(limparAviso, ms);
+}
+
+function limparAviso() {
+  clearTimeout(timerAviso);
+  timerAviso = null;
+  elRodapeAviso.textContent = '';
+  delete elRodapeBarra.dataset.aviso;
+}
+
+/* Bloco "Cenas da mesa" nos ajustes. */
+function desenharCenas() {
+  const numeros = new Set(cena.vistas);
+  for (const n of cena.nomes.keys()) numeros.add(n);
+  if (cena.atual) numeros.add(cena.atual.numero);
+  const lista = [...numeros].sort((a, b) => a - b);
+
+  // Quem estava com o foco num item volta para o mesmo item depois de redesenhar.
+  const ativo = document.activeElement;
+  const focado = ativo && elListaCenas.contains(ativo) ? ativo.dataset.cena : null;
+
+  elCenasExplica.textContent = lista.length
+    ? 'A mesa só informa o número da cena. Toque numa cena para dar um nome; ele aparece em todos os celulares.'
+    : 'Nenhuma cena vista ainda. Troque de cena na mesa para ela aparecer aqui. ' +
+      'Se não aparecer, ligue PROGRAM CHANGE Tx no menu MIDI da mesa.';
+
+  elListaCenas.textContent = '';
+  elListaCenas.hidden = !lista.length;
+
+  for (const numero of lista) {
+    const nome = nomeDaCena(numero);
+    const ehAtual = !!cena.atual && cena.atual.numero === numero;
+
+    const item = document.createElement('li');
+    item.className = 'lista__item';
+    if (ehAtual) {
+      item.classList.add('lista__item--atual');
+      item.setAttribute('aria-current', 'true');
+    }
+
+    // Mesmo padrao do renomear de controles: o nome inteiro e o botao.
+    const botao = document.createElement('button');
+    botao.type = 'button';
+    botao.className = 'lista__info lista__renomear';
+    botao.dataset.cena = String(numero);
+    botao.setAttribute('aria-label', nome
+      ? 'Renomear a cena ' + numero + ', "' + nome + '"'
+      : 'Dar nome à cena ' + numero);
+    botao.addEventListener('click', () => nomearCena(numero));
+
+    const linha = document.createElement('span');
+    linha.className = 'lista__linha';
+
+    const titulo = document.createElement('span');
+    titulo.className = 'lista__nome';
+    titulo.textContent = nome || 'Cena ' + numero;
+    if (!nome) titulo.classList.add('lista__nome--vazio');
+
+    linha.append(titulo, iconeLapis());
+
+    const estado = document.createElement('span');
+    estado.className = 'lista__estado';
+    estado.textContent = nome ? 'cena ' + numero : 'sem nome';
+
+    botao.append(linha, estado);
+    item.appendChild(botao);
+
+    if (ehAtual) {
+      const agora = document.createElement('span');
+      agora.className = 'lista__agora';
+      agora.textContent = 'agora';
+      item.appendChild(agora);
+    }
+
+    elListaCenas.appendChild(item);
+  }
+
+  if (focado !== null) {
+    const volta = elListaCenas.querySelector('[data-cena="' + focado + '"]');
+    if (volta) volta.focus();
+  }
+}
+
+function nomearCena(numero) {
+  if (!conectado) {
+    alert('Sem conexão com o bridge. Dê o nome quando reconectar.');
+    return;
+  }
+
+  const atual = nomeDaCena(numero);
+  let sugestao = atual;
+  for (;;) {
+    const digitado = prompt(atual
+      ? 'Nome da cena ' + numero + '. Deixe vazio para tirar o nome.'
+      : 'Nome para a cena ' + numero + ' (por exemplo, quem usa essa cena)', sugestao);
+    if (digitado === null) return; // cancelou
+
+    const nome = digitado.trim();
+    if (!nome) {
+      if (!atual) return;
+      if (!confirm('Tirar o nome "' + atual + '" da cena ' + numero + '?')) return;
+      enviar({ type: 'cena:nomear', numero, nome: '' });
+      return;
+    }
+    if (nome.length > NOME_CENA_MAX) {
+      alert('Use no máximo ' + NOME_CENA_MAX + ' letras. Cortei o que passou, confira.');
+      sugestao = nome.slice(0, NOME_CENA_MAX).trim();
+      continue;
+    }
+    if (nome === atual) return;
+
+    // A resposta de sucesso e uma mensagem 'cena' nova, que redesenha tudo.
+    enviar({ type: 'cena:nomear', numero, nome });
+    return;
+  }
+}
+
+/** Linha "cena:" do diagnostico, a partir de /api/status.cena. */
+function descreverCenaNoDiagnostico(dado) {
+  if (dado === undefined) return 'o programa não informa (versão sem cenas)';
+  if (!dado || numeroDeCena(dado.numero) === null) return 'nenhuma vista ainda';
+
+  const partes = [];
+  if (dado.origem) partes.push('origem ' + (dado.origem === 'funcao' ? 'função' : dado.origem));
+  const bruto = hexDoBruto(dado.bruto);
+  if (bruto) partes.push('bruto ' + bruto);
+  const quando = quandoNoDiagnostico(dado.em);
+  if (quando) partes.push(quando);
+  return dado.numero + (partes.length ? ' (' + partes.join(', ') + ')' : '');
+}
+
+/** "C0 02", venha como texto ou como lista de bytes. */
+function hexDoBruto(bruto) {
+  if (typeof bruto === 'string') return bruto.trim().toUpperCase();
+  if (Array.isArray(bruto)) {
+    return bruto.map((b) => (Number(b) & 0xff).toString(16).toUpperCase().padStart(2, '0')).join(' ');
+  }
+  return '';
+}
+
+/** "às 19:02", ou "em 02/10 às 19:02" quando nao foi hoje. */
+function quandoNoDiagnostico(em) {
+  if (em === null || em === undefined || em === '') return '';
+  const data = new Date(em);
+  if (Number.isNaN(data.getTime())) return 'em ' + String(em);
+  const hora = data.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (data.toDateString() === new Date().toDateString()) return 'às ' + hora;
+  return 'em ' + data.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) + ' às ' + hora;
+}
 
 /* ---- diagnostico para colar numa conversa ----------------------------- */
 
@@ -887,6 +1215,7 @@ elBtnDiagnostico.addEventListener('click', async () => {
       'mesa: ' + (dados.midi.simulado ? 'NAO ENCONTRADA' : dados.midi.saida),
       'motivo: ' + (dados.midi.motivo || 'sem erro'),
       'portas MIDI vistas: ' + ((dados.midi.portasVistas || []).join(' | ') || 'nenhuma'),
+      'cena: ' + descreverCenaNoDiagnostico(dados.cena),
       'controles: ' + dados.controles + ', sem calibrar: ' + (dados.naoCalibrados.join(', ') || 'nenhum'),
       'celulares conectados: ' + dados.clientes,
       'versão: ' + ((dados.versao && dados.versao.sha) || 'desconhecida') +

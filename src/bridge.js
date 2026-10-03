@@ -10,6 +10,8 @@
  *   4. conduz a calibracao pedida pelo celular, sem precisar de terminal,
  *      e cria os outros canais a partir de um calibrado, conferindo cada um
  *      com a mesa
+ *   5. percebe quando a equipe chama uma cena na mesa, mostra qual entrou e
+ *      rele da mesa os controles calibrados (so leitura)
  *
  * Seguranca de audio: o bridge so envia SysEx de controles marcados como
  * "calibrado": true no config.json. Enquanto voce nao calibrar, mexer nos
@@ -89,8 +91,16 @@ const controles = cfg.controles;
 const porId = new Map();
 const naoCalibrados = [];
 
+// Cenas: o app guarda no maximo 100 numeros ja vistos (a mesa tem 00 a 99).
+const MAX_CENAS_VISTAS = 100;
+const NOME_CENA_MAX = 30;
+
 const estado = { valores: {}, mutes: {} };
 const salvo = configArquivo.carregarEstado();
+
+// Ultima cena que a mesa chamou e as que ja apareceram, vindas do estado.json:
+// sobrevivem a reinicio do programa.
+estado.cena = lerCenaSalva(salvo.cena);
 
 /** Refaz os indices depois de qualquer mudanca na lista de controles. */
 function aplicarListaDeControles(lista) {
@@ -139,9 +149,14 @@ function gravarControles(transformar) {
 // MIDI
 // ---------------------------------------------------------------------------
 
+/** Entrada da mesa com SysEx e Program Change (que avisa a troca de cena). */
+function abrirEntradaDaMesa() {
+  return abrirEntrada(cfg.midi.entrada, aoReceberDaMesa, { programChange: true });
+}
+
 // As portas sao procuradas sozinhas quando o config.json nao diz qual usar.
 let saidaMidi = abrirSaida(cfg.midi.saida);
-let entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+let entradaMidi = abrirEntradaDaMesa();
 
 function contarMidi(inicial) {
   if (saidaMidi.simulado) {
@@ -171,10 +186,11 @@ function procurarMesa() {
     // Entrada e saida sao o mesmo cabo: se uma morreu, as duas sao reabertas.
     console.warn('[midi] a mesa sumiu (desligada ou cabo solto), procurando de novo');
     interromperGeracao('a mesa sumiu no meio');
+    interromperReleitura('a mesa sumiu no meio');
     try { saidaMidi.fechar(); } catch { /* ignora */ }
     try { entradaMidi.fechar(); } catch { /* ignora */ }
     saidaMidi = abrirSaida(cfg.midi.saida);
-    entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+    entradaMidi = abrirEntradaDaMesa();
     contarMidi(false);
     transmitirStatus();
     if (!saidaMidi.simulado) reaplicarMix();
@@ -195,7 +211,7 @@ function procurarMesa() {
   }
 
   if (entradaMidi.simulado) {
-    const nova = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+    const nova = abrirEntradaDaMesa();
     if (!nova.simulado) {
       try { entradaMidi.fechar(); } catch { /* ignora */ }
       entradaMidi = nova;
@@ -255,17 +271,39 @@ function despacharFila() {
 setInterval(despacharFila, Math.max(5, cfg.midi.intervaloEnvioMs || 25)).unref();
 
 /**
- * Chegou SysEx da mesa.
+ * Chegou mensagem da mesa (SysEx ou Program Change).
  *
- * Se alguem estiver calibrando pelo celular, o quadro vai para essa conversa.
- * Fora isso, se ele bater com o molde de algum controle ja calibrado, o estado
- * e atualizado e os celulares avisados: mexeu no send direto na mesa, o app
+ * Troca de cena vem antes de tudo e para ali: nunca vira quadro de
+ * calibracao nem valor de controle. Depois, resposta a pedido de leitura
+ * (criacao de canais ou releitura da cena) e so de quem pediu. Se alguem
+ * estiver calibrando pelo celular, o quadro vai para essa conversa. Fora
+ * isso, se ele bater com o molde de algum controle ja calibrado, o estado e
+ * atualizado e os celulares avisados: mexeu no send direto na mesa, o app
  * acompanha em vez de mostrar valor errado.
  */
 function aoReceberDaMesa(bytes) {
-  // Resposta ao pedido de leitura da criacao de canais: e so dela.
-  const pendente = geracao && geracao.pendente;
-  if (pendente) {
+  const cena = cenaDaMensagem(bytes);
+  if (cena) {
+    tratarCena(cena);
+    return;
+  }
+  if (bytes[0] !== mesa.INICIO_SYSEX) {
+    // Program Change sem cena na tabela de fabrica (#101 a #128): fica no
+    // diagnostico, para quem for conferir a tabela Pgm Asgn da mesa.
+    if (bytes[0] >= 0xc0 && bytes[0] <= 0xcf) {
+      console.warn('[cena] Program Change sem cena na tabela de fabrica: ' + mesa.paraHex(bytes));
+    }
+    return;
+  }
+  if (mesa.pareceRecallDeCena(bytes)) {
+    console.warn('[cena] SCENE RECALL fora do formato esperado: ' + mesa.paraHex(bytes));
+    return;
+  }
+
+  // Resposta ao pedido de leitura (criacao de canais ou releitura): e so dela.
+  for (const fluxo of [geracao, releitura]) {
+    const pendente = fluxo && fluxo.pendente;
+    if (!pendente) continue;
     const raw = mesa.lerValorDoFrame(pendente.candidato, bytes);
     if (raw !== null) {
       pendente.responder(raw);
@@ -273,11 +311,23 @@ function aoReceberDaMesa(bytes) {
     }
   }
 
+  // Resposta que chegou depois do tempo de espera: nunca cai na calibracao
+  // nem no pedido seguinte. Se for de um controle, vale como o valor dele.
+  if (tirarAtrasada(bytes)) {
+    acompanharMesa(bytes);
+    return;
+  }
+
   if (sessoes.size) {
     for (const [cliente, sessao] of sessoes) alimentarSessao(cliente, sessao, bytes);
     return;
   }
 
+  acompanharMesa(bytes);
+}
+
+/** Alguem mexeu num controle calibrado direto na mesa: o app acompanha. */
+function acompanharMesa(bytes) {
   const janela = cfg.midi.janelaEcoMs || 400;
   for (const controle of controles) {
     const raw = mesa.lerValorDoFrame(controle, bytes);
@@ -340,6 +390,15 @@ function iniciarSessao(cliente, msg) {
     });
     return;
   }
+  // Nem enquanto rele a mesa depois de uma troca de cena (veja comecarReleitura).
+  if (releitura) {
+    enviarPara(cliente, {
+      type: 'learn:erro',
+      message: 'Estou relendo a mesa depois da troca de cena. Espere uns segundos para calibrar.',
+      etapa: 'nome'
+    });
+    return;
+  }
   sessoes.set(cliente, {
     idAtual: typeof msg.control === 'string' ? msg.control : null,
     rotulo: String(msg.label || '').trim().slice(0, 40),
@@ -351,6 +410,11 @@ function iniciarSessao(cliente, msg) {
     ultimoAviso: 0
   });
   enviarPara(cliente, { type: 'learn:pronto-para', step: 'min' });
+}
+
+/** Fecha a calibracao desse celular; se uma releitura de cena esperava, ela roda agora. */
+function encerrarSessao(cliente) {
+  if (sessoes.delete(cliente)) tentarReleituraPendente();
 }
 
 function capturarNaSessao(cliente, msg) {
@@ -424,7 +488,7 @@ function salvarSessao(cliente) {
     return;
   }
 
-  sessoes.delete(cliente);
+  encerrarSessao(cliente);
   console.log('[learn] controle "' + controle.rotulo + '" calibrado (offset ' +
     controle.valueOffset + ', ' + controle.valueLength + ' byte(s), ' +
     controle.rawMin + ' a ' + controle.rawMax + ')');
@@ -515,13 +579,19 @@ function enderecoJaExiste(lista, candidato) {
   );
 }
 
-/** Espera a mesa responder o pedido. Registrada antes do envio: a resposta pode ser rapida. */
+/**
+ * Espera a mesa responder o pedido. Registrada antes do envio: a resposta pode
+ * ser rapida. Serve a criacao de canais e a releitura de cena (g e o fluxo).
+ * Sem resposta a tempo (ou interrompido), o pedido ja saiu: se a mesa
+ * responder depois, a resposta fica de quarentena (veja lembrarAtrasada).
+ */
 function esperarResposta(g, candidato) {
   return new Promise((ok) => {
     const timer = setTimeout(() => terminar(null), esperaResposta());
     function terminar(raw) {
       clearTimeout(timer);
       if (g.pendente === pendente) g.pendente = null;
+      if (raw === null) lembrarAtrasada(candidato);
       ok(raw);
     }
     const pendente = { candidato, responder: terminar };
@@ -536,6 +606,10 @@ function recusarGeracao(cliente, message) {
 function iniciarGeracao(cliente, msg) {
   if (geracao) {
     return recusarGeracao(cliente, 'Ja estou criando canais agora. Espere terminar e tente de novo.');
+  }
+  // Releitura da cena usa a mesma entrada para as respostas: uma coisa por vez.
+  if (releitura) {
+    return recusarGeracao(cliente, 'Estou relendo a mesa depois da troca de cena. Espere uns segundos e tente de novo.');
   }
   // Calibrar e criar canais nunca rodam juntos: uma resposta atrasada da mesa
   // cairia na calibracao e o controle ficaria com o endereco de outro canal.
@@ -615,6 +689,8 @@ function iniciarGeracao(cliente, msg) {
     }
   }).finally(() => {
     if (geracao === g) geracao = null;
+    // Trocaram de cena enquanto os canais eram criados: rele agora.
+    tentarReleituraPendente();
   });
 }
 
@@ -716,6 +792,327 @@ function concluirGeracao(g) {
     interrompido: g.interrompido
   });
   anunciarControles();
+}
+
+// ---------------------------------------------------------------------------
+// Respostas atrasadas
+// ---------------------------------------------------------------------------
+
+/**
+ * Pedido sem resposta a tempo ja saiu para a mesa, e ela ainda pode responder
+ * depois. Essa resposta nao pode cair no pedido seguinte nem numa calibracao
+ * aberta logo em seguida (os tres fluxos leem a mesma entrada). Ela fica
+ * reconhecida aqui por um tempo e, se for de um controle, vale so como o
+ * valor atual dele.
+ */
+const atrasadas = [];
+
+function lembrarAtrasada(candidato) {
+  atrasadas.push({ candidato, ate: Date.now() + Math.max(2000, 4 * esperaResposta()) });
+  if (atrasadas.length > 64) atrasadas.shift();
+}
+
+/** true se o quadro e resposta atrasada de algum pedido (e tira da lista). */
+function tirarAtrasada(bytes) {
+  const agora = Date.now();
+  for (let i = atrasadas.length - 1; i >= 0; i--) {
+    if (atrasadas[i].ate < agora) atrasadas.splice(i, 1);
+  }
+  const i = atrasadas.findIndex((a) => mesa.lerValorDoFrame(a.candidato, bytes) !== null);
+  if (i < 0) return false;
+  atrasadas.splice(i, 1);
+  console.log('[midi] resposta atrasada da mesa: ' + mesa.paraHex(bytes));
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cena da mesa
+// ---------------------------------------------------------------------------
+
+/**
+ * A equipe de som chama cenas na mesa, e a cena tambem muda os sends dos fones
+ * (a nao ser com Recall Safe nos AUX). O app mostra qual cena entrou, com o
+ * nome dado pelo app, e logo depois rele da mesa os controles calibrados, so
+ * com pedidos de leitura (Parameter request), para os faders da tela ficarem
+ * iguais aos da mesa. A releitura nunca manda Parameter change.
+ */
+
+// O mesmo recall pode chegar duas vezes (Program Change e SysEx de funcao).
+const JANELA_CENA_REPETIDA_MS = 1000;
+
+let ultimaCenaRecebida = null; // { numero, quando }
+let releitura = null; // a releitura rodando agora
+let timerReleitura = null; // espera a mesa assentar depois da ultima troca
+let releituraPendente = null; // numero da cena esperando calibracao/criacao acabar
+
+function ehNumeroDeCena(n) {
+  return Number.isInteger(n) && n >= 0 && n < mesa.TOTAL_CENAS;
+}
+
+function ordenarVistas(lista) {
+  return [...new Set(lista)].sort((a, b) => a - b).slice(0, MAX_CENAS_VISTAS);
+}
+
+/** Cena salva no estado.json, conferida campo a campo (o arquivo pode estar velho ou estragado). */
+function lerCenaSalva(salva) {
+  const cena = { atual: null, vistas: [] };
+  if (!salva || typeof salva !== 'object') return cena;
+  const a = salva.atual;
+  if (a && typeof a === 'object' && ehNumeroDeCena(a.numero)) {
+    cena.atual = {
+      numero: a.numero,
+      em: typeof a.em === 'string' ? a.em.slice(0, 40) : null,
+      origem: a.origem === 'programa' || a.origem === 'funcao' ? a.origem : null,
+      bruto: typeof a.bruto === 'string' ? a.bruto.slice(0, 120) : null
+    };
+  }
+  if (Array.isArray(salva.vistas)) cena.vistas = ordenarVistas(salva.vistas.filter(ehNumeroDeCena));
+  return cena;
+}
+
+/** Tira caracteres de controle, espacos das pontas e corta em 30 letras. */
+function limparNomeDeCena(nome) {
+  const texto = String(nome).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  return Array.from(texto).slice(0, NOME_CENA_MAX).join('').trim();
+}
+
+/** Nomes das cenas do config.json ({ "3": "Pedro" }), so os validos. */
+function nomesDasCenas(origem = cfg.cenas) {
+  const nomes = {};
+  if (!origem || typeof origem !== 'object' || Array.isArray(origem)) return nomes;
+  for (const [chave, nome] of Object.entries(origem)) {
+    if (!/^\d{1,2}$/.test(chave) || typeof nome !== 'string') continue;
+    const limpo = limparNomeDeCena(nome);
+    if (limpo) nomes[String(Number(chave))] = limpo;
+  }
+  return nomes;
+}
+
+function mensagemCena() {
+  const nomes = nomesDasCenas();
+  const a = estado.cena.atual;
+  return {
+    type: 'cena',
+    atual: a
+      ? { numero: a.numero, nome: nomes[a.numero] || null, em: a.em, origem: a.origem, bruto: a.bruto }
+      : null,
+    nomes,
+    vistas: estado.cena.vistas.slice()
+  };
+}
+
+/** { numero, origem, bruto } se a mensagem da mesa e troca de cena, senao null. */
+function cenaDaMensagem(bytes) {
+  const pc = mesa.cenaDoProgramChange(bytes);
+  if (pc) return { numero: pc.numero, origem: 'programa', bruto: pc.bruto };
+  const numero = mesa.cenaDoSysex(bytes);
+  if (numero !== null) return { numero, origem: 'funcao', bruto: mesa.paraHex(bytes) };
+  return null;
+}
+
+function tratarCena({ numero, origem, bruto }) {
+  const agora = Date.now();
+  const ultima = ultimaCenaRecebida;
+  if (ultima && ultima.numero === numero && agora - ultima.quando < JANELA_CENA_REPETIDA_MS) {
+    console.log('[cena] ' + numero + ' de novo (' + origem + ': ' + bruto + '): mesma troca, contei uma vez');
+    // A releitura ainda nao comecou: conta a espera a partir desta mensagem.
+    if (timerReleitura) armarReleitura(numero);
+    return;
+  }
+  ultimaCenaRecebida = { numero, quando: agora };
+
+  estado.cena.atual = { numero, em: new Date(agora).toISOString(), origem, bruto };
+  estado.cena.vistas = ordenarVistas([...estado.cena.vistas, numero]);
+  console.log('[cena] entrou a cena ' + numero + ' (' + origem + ': ' + bruto + ')');
+
+  transmitir(mensagemCena());
+  agendarSalvamento();
+  agendarReleitura(numero);
+}
+
+function semMesa() {
+  return saidaMidi.simulado || entradaMidi.simulado;
+}
+
+function esperaCena() {
+  const ms = Number(cfg.midi.esperaCenaMs);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(10000, ms) : 400;
+}
+
+function agendarReleitura(numero) {
+  if (semMesa()) {
+    console.log('[cena] sem mesa no cabo: so registrei a cena, nada para reler');
+    return;
+  }
+  // Troca nova no meio da releitura: o que ela leu ja nao e a cena atual.
+  interromperReleitura('a mesa trocou de cena de novo');
+  armarReleitura(numero);
+}
+
+/** A mesa leva um instante para assentar a cena: rele um pouco depois da ultima troca. */
+function armarReleitura(numero) {
+  clearTimeout(timerReleitura);
+  timerReleitura = setTimeout(() => {
+    timerReleitura = null;
+    comecarReleitura(numero);
+  }, esperaCena());
+  timerReleitura.unref();
+}
+
+function interromperReleitura(motivo) {
+  if (!releitura || releitura.cancelada) return;
+  releitura.cancelada = true;
+  console.log('[cena] releitura interrompida: ' + motivo);
+  if (releitura.pendente) releitura.pendente.responder(null);
+}
+
+/** Calibracao ou criacao de canais acabou: se alguma cena esperava releitura, vai agora. */
+function tentarReleituraPendente() {
+  if (releituraPendente === null || timerReleitura) return;
+  if (geracao || sessoes.size || releitura) return;
+  comecarReleitura(releituraPendente);
+}
+
+function comecarReleitura(numero) {
+  releituraPendente = null;
+  if (semMesa()) {
+    console.log('[cena] a mesa saiu do cabo antes de reler a cena ' + numero);
+    return;
+  }
+  // Releitura, criacao de canais e calibracao nunca rodam juntas: as tres leem
+  // a mesma entrada, e uma resposta atrasada cairia no fluxo errado.
+  if (geracao || sessoes.size || releitura) {
+    releituraPendente = numero;
+    const quem = geracao ? 'a criacao de canais' : sessoes.size ? 'a calibracao' : 'a releitura anterior';
+    console.log('[cena] a releitura da cena ' + numero + ' espera ' + quem + ' terminar');
+    return;
+  }
+
+  const fila = [];
+  for (const c of controles) {
+    const pedido = mesa.montarPedidoDoControle(c);
+    if (pedido) fila.push({ id: c.id, controle: { ...c, template: c.template.slice() }, pedido });
+  }
+  if (!fila.length) {
+    console.log('[cena] nenhum controle no formato do manual para reler');
+    return;
+  }
+
+  const r = {
+    numero,
+    fila,
+    lidos: [],
+    semResposta: [],
+    cancelada: false,
+    pendente: null,
+    saida: saidaMidi,
+    entrada: entradaMidi
+  };
+  releitura = r;
+  rodarReleitura(r)
+    .catch((erro) => console.error('[cena] erro na releitura: ' + erro.message))
+    .finally(() => {
+      if (releitura === r) releitura = null;
+      tentarReleituraPendente();
+    });
+}
+
+/** Um pedido por vez; cada resposta casada com o molde do proprio controle. */
+async function rodarReleitura(r) {
+  console.log('[cena] relendo ' + r.fila.length + ' controle(s) da mesa (cena ' + r.numero + ')');
+
+  for (const item of r.fila) {
+    if (r.cancelada) break;
+    if (mesaSaiuDoAr(r)) {
+      interromperReleitura('a mesa saiu do ar');
+      break;
+    }
+    // Removido ou recalibrado enquanto relia: ja nao e o mesmo endereco.
+    if (!mesa.mesmoEndereco(porId.get(item.id), item.controle)) continue;
+
+    const pedidoEm = Date.now();
+    const resposta = esperarResposta(r, item.controle);
+    // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
+    r.saida.enviar(item.pedido);
+    const raw = await resposta;
+
+    if (raw === null) {
+      if (!r.cancelada) r.semResposta.push(item.id);
+      continue;
+    }
+    r.lidos.push(item.id);
+    aplicarReleitura(item.id, raw, pedidoEm);
+  }
+
+  // Os valores vao pelo "state" de sempre, antes do aviso de fim.
+  const values = {};
+  const mutes = {};
+  for (const id of r.lidos) {
+    if (!porId.has(id)) continue;
+    values[id] = estado.valores[id];
+    mutes[id] = estado.mutes[id];
+  }
+  if (Object.keys(values).length) {
+    transmitir({ type: 'state', values, mutes });
+    agendarSalvamento();
+  }
+
+  console.log('[cena] releitura da cena ' + r.numero + ': ' + r.lidos.length + ' lido(s), ' +
+    r.semResposta.length + ' sem resposta' + (r.cancelada ? ', interrompida' : ''));
+  if (r.cancelada) return; // a releitura da cena nova manda o aviso dela
+
+  transmitir({
+    type: 'cena:relida',
+    numero: r.numero,
+    lidos: r.lidos.slice(),
+    semResposta: r.semResposta.slice()
+  });
+}
+
+/**
+ * O valor lido vira o do fader, e o mudo sai se a mesa tem som ali (como
+ * quando alguem mexe direto na mesa). Nada e mandado de volta para ela.
+ */
+function aplicarReleitura(id, raw, pedidoEm) {
+  const controle = porId.get(id);
+  if (!controle) return;
+  // O celular mexeu nesse controle depois do pedido: o valor dele ja esta indo
+  // (ou foi) para a mesa e vale mais que a leitura.
+  if (pendentes.has(id) || (ultimoEnvio.get(id) || 0) >= pedidoEm) return;
+
+  const valor = mesa.escalarParaNormalizado(raw, controle.rawMin, controle.rawMax);
+  estado.valores[id] = valor;
+  if (valor > 0) estado.mutes[id] = false;
+}
+
+/** Nome dado pelo app a uma cena (vazio apaga). Fica no config.json. */
+function nomearCena(cliente, msg) {
+  if (!ehNumeroDeCena(msg.numero)) {
+    enviarPara(cliente, { type: 'controle:erro', message: 'Cena invalida: o numero vai de 0 a 99.' });
+    return;
+  }
+  if (msg.nome !== undefined && msg.nome !== null && typeof msg.nome !== 'string') {
+    enviarPara(cliente, { type: 'controle:erro', message: 'O nome da cena precisa ser um texto.' });
+    return;
+  }
+  const numero = msg.numero;
+  const nome = limparNomeDeCena(msg.nome || '');
+
+  try {
+    const atual = configArquivo.carregar();
+    const nomes = nomesDasCenas(atual.cenas);
+    if (nome) nomes[numero] = nome;
+    else delete nomes[numero];
+    atual.cenas = nomes;
+    configArquivo.salvar(atual);
+    cfg.cenas = nomes;
+  } catch (erro) {
+    enviarPara(cliente, { type: 'controle:erro', message: 'Nao consegui salvar: ' + erro.message });
+    return;
+  }
+
+  console.log('[cena] nome da cena ' + numero + (nome ? ' salvo' : ' apagado'));
+  transmitir(mensagemCena());
 }
 
 // ---------------------------------------------------------------------------
@@ -828,6 +1225,15 @@ const servidor = http.createServer((req, res) => {
       controles: controles.length,
       naoCalibrados,
       clientes: wss ? wss.clients.size : 0,
+      // Na igreja, confere se o numero bate com o display (hipotese byte = programa - 1).
+      cena: estado.cena.atual
+        ? {
+            numero: estado.cena.atual.numero,
+            origem: estado.cena.atual.origem,
+            bruto: estado.cena.atual.bruto,
+            em: estado.cena.atual.em
+          }
+        : null,
       avisos
     });
     return;
@@ -895,10 +1301,12 @@ wss.on('connection', (cliente, req) => {
   cliente.vivo = true;
   cliente.on('pong', () => { cliente.vivo = true; });
 
-  // Sequencia de boas vindas: lista de faders, situacao do MIDI e estado atual.
+  // Sequencia de boas vindas: lista de faders, situacao do MIDI, estado atual
+  // e a cena em que a mesa esta (com os nomes dados pelo app).
   enviarPara(cliente, { type: 'controls', controls: listaParaApp() });
   enviarPara(cliente, statusAtual());
   enviarPara(cliente, { type: 'state', values: estado.valores, mutes: estado.mutes });
+  enviarPara(cliente, mensagemCena());
 
   cliente.on('message', (dados) => {
     let msg;
@@ -962,7 +1370,7 @@ wss.on('connection', (cliente, req) => {
         return;
 
       case 'learn:cancelar':
-        sessoes.delete(cliente);
+        encerrarSessao(cliente);
         return;
 
       case 'controle:remover': {
@@ -1004,6 +1412,10 @@ wss.on('connection', (cliente, req) => {
         iniciarGeracao(cliente, msg);
         return;
 
+      case 'cena:nomear':
+        nomearCena(cliente, msg);
+        return;
+
       // Escolher a porta da mesa pelo celular, para nunca precisar editar
       // arquivo na maquina do rack.
       case 'midi:portas': {
@@ -1033,10 +1445,11 @@ wss.on('connection', (cliente, req) => {
         cfg.midi.entrada = escolha;
 
         interromperGeracao('a porta da mesa foi trocada');
+        interromperReleitura('a porta da mesa foi trocada');
         try { saidaMidi.fechar(); } catch { /* ignora */ }
         try { entradaMidi.fechar(); } catch { /* ignora */ }
         saidaMidi = abrirSaida(cfg.midi.saida);
-        entradaMidi = abrirEntrada(cfg.midi.entrada, aoReceberDaMesa);
+        entradaMidi = abrirEntradaDaMesa();
 
         console.log('[midi] porta escolhida pelo celular: ' + (escolha || 'automatica'));
         contarMidi(false);
@@ -1068,7 +1481,7 @@ wss.on('connection', (cliente, req) => {
   });
 
   cliente.on('close', () => {
-    sessoes.delete(cliente);
+    encerrarSessao(cliente);
     if (geracao && geracao.cliente === cliente) {
       console.log('[gerar] o celular que pediu saiu; termino e salvo o que a mesa confirmar');
     }
@@ -1076,7 +1489,7 @@ wss.on('connection', (cliente, req) => {
   });
 
   cliente.on('error', (erro) => {
-    sessoes.delete(cliente);
+    encerrarSessao(cliente);
     console.warn('[ws] erro no cliente ' + origem + ': ' + erro.message);
   });
 });

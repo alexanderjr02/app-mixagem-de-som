@@ -107,14 +107,19 @@ function salvar(cfg) {
   gravarAtomico(CAMINHO_CONFIG, JSON.stringify(cfg, null, 2) + '\n');
 }
 
-/** Le o ultimo mix salvo. Nunca quebra: se der erro, volta vazio. */
+/**
+ * Le o ultimo mix salvo (e a ultima cena vista, se houver; quem usa confere
+ * o conteudo). Nunca quebra: se der erro, volta vazio.
+ */
 function carregarEstado() {
   try {
     const dados = lerJson(CAMINHO_ESTADO);
-    return {
+    const estado = {
       valores: dados.valores && typeof dados.valores === 'object' ? dados.valores : {},
       mutes: dados.mutes && typeof dados.mutes === 'object' ? dados.mutes : {}
     };
+    if (dados.cena && typeof dados.cena === 'object') estado.cena = dados.cena;
+    return estado;
   } catch {
     return { valores: {}, mutes: {} };
   }

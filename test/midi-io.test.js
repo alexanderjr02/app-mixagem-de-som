@@ -55,3 +55,20 @@ test('se nem listar as portas funciona, trata a mesa como perdida', () => {
   const quebrada = { getPortCount: () => { throw new Error('Internal RtMidi error'); } };
   assert.equal(aindaNaLista(quebrada, 'YAMAHA 01V96'), false);
 });
+
+test('a entrada passa SysEx sempre e Program Change so quando pedido', () => {
+  const { mensagemQueServe } = require('../src/midi-io');
+  const sysex = [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0x00, 0x00, 0xf7];
+  assert.equal(mensagemQueServe(sysex), true);
+  assert.equal(mensagemQueServe(sysex, { programChange: true }), true);
+
+  // Sem a opcao (calibracao e monitor pelo terminal), Program Change fica de fora.
+  assert.equal(mensagemQueServe([0xc0, 0x02]), false);
+  assert.equal(mensagemQueServe([0xc0, 0x02], { programChange: true }), true);
+  assert.equal(mensagemQueServe([0xcf, 0x63], { programChange: true }), true);
+
+  // O resto continua de fora mesmo com a opcao.
+  for (const m of [[0xb0, 0x07, 0x40], [0x90, 0x40, 0x7f], [0xf8], [0xfe], [0xc0], [0xc0, 0x80], [0xd0, 0x02], [], null]) {
+    assert.equal(mensagemQueServe(m, { programChange: true }), false, JSON.stringify(m));
+  }
+});

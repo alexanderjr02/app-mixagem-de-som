@@ -118,6 +118,63 @@ button, input, select { font-family: inherit; }
   text-transform: uppercase;
 }
 
+/* Cena da mesa, colada na marca. E a unica coisa do topo que encolhe: o app.js
+   tenta "Cena 3 · Pedro", depois tira o "01V96" e por fim encurta para "C3".
+   O nome corta com reticencias so em ultimo caso. */
+.cena {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--linha-forte);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--texto-2);
+  white-space: nowrap;
+}
+
+.cena__numero {
+  flex: none;
+  color: var(--texto);
+  font-variant-numeric: tabular-nums;
+}
+
+.cena__ponto {
+  flex: none;
+  color: var(--texto-3);
+}
+
+.cena__nome {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cena__letra { display: none; }
+
+.topo[data-cena="compacta"] .marca__sub,
+.topo[data-cena="curta"] .marca__sub { display: none; }
+
+.topo[data-cena="curta"] .cena__letra { display: inline; }
+
+/* Some da tela, mas o leitor de tela continua lendo "Cena 3". */
+.topo[data-cena="curta"] .cena__palavra {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A equipe de som trocou de cena: o rotulo pisca uma vez, sem som e sem
+   tomar a tela. O texto do que aconteceu fica no rodape. */
+.cena--trocou { animation: pulsar 1.1s ease-in-out 1; }
+
 .topo__acoes {
   display: flex;
   align-items: center;
@@ -450,6 +507,11 @@ body[data-conexao="ligando"] .mestre {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Aviso passageiro: enquanto tem texto, toma o lugar do rodape de sempre. */
+.rodape[data-aviso] .rodape__texto { display: none; }
+
+.rodape__aviso { color: var(--texto); }
 
 /* ------------------------- folhas (dialogos) ----------------------------- */
 
@@ -824,6 +886,38 @@ select.painel__campo {
 
 .lista__acoes .botao { min-height: 40px; }
 
+/* Cena sem nome: aparece "Cena 5", um tom abaixo de um nome de verdade. */
+.lista__nome--vazio { color: var(--texto-2); }
+
+/* Dentro de um bloco, o item desce um tom para nao sumir no fundo. */
+.bloco .lista__item { background: var(--superficie); }
+
+/* A cena que esta na mesa agora: borda mais forte e o mesmo ponto aceso da
+   conexao. */
+.lista__item--atual { border-color: var(--linha-forte); }
+
+.lista__agora {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--texto);
+}
+
+.lista__agora::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--texto);
+  box-shadow: 0 0 0 3px rgba(246, 246, 248, 0.14);
+  flex: none;
+}
+
 .lista__vazio {
   padding: 18px 12px;
   font-size: 13px;
@@ -1085,6 +1179,7 @@ select.painel__campo {
 
 @media (prefers-reduced-motion: reduce) {
   .conexao__ponto,
+  .cena--trocou,
   .medidor__texto--ativo::before,
   .painel[open] { animation: none; }
   .medidor__barra > span { transition: none; }

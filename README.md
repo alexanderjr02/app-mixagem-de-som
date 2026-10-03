@@ -177,6 +177,43 @@ canal não serve de modelo. Calibre os canais um a um, como antes.
 Nos ajustes, renomeie "Canal 5" para "Teclado" (até 40 letras). Só o nome
 muda: a calibração e o volume no seu fone continuam iguais.
 
+## Ver a cena da mesa no app
+
+Quando a equipe de som chama uma cena na mesa, a cena também muda os sends
+dos fones. O app mostra qual cena entrou e, logo em seguida, pergunta para a
+mesa o valor de cada fader calibrado, para a tela ficar igual à mesa. Essa
+pergunta é só leitura: **não muda nada no som**. Chamar cena continua sendo
+coisa da equipe, na mesa: o app nunca chama cena.
+
+**O que ligar na 01V96 (uma vez):**
+
+1. **MIDI | Setup**: `PROGRAM CHANGE` com **Tx ON**. É o que faz a mesa avisar
+   a troca de cena.
+2. **DIO/Setup > MIDI/Host**: **Tx PORT** = `USB` (ou `MIDI`, se você usa
+   interface MIDI).
+3. **Parameter Change** com **TX** e **RX** ligados, como já está em
+   "Preparar a 01V96". Sem o RX a mesa não responde, e os faders não são
+   relidos.
+
+**Tabela de cenas (Pgm Asgn):** o app usa a tabela de fábrica: programa #1 a
+#99 chamam as cenas 01 a 99, e o #100 chama a cena 00. Se a equipe mudou essa
+tabela, o número no app pode não bater com o da mesa; o `INITIALIZE` da página
+da tabela volta ao padrão de fábrica.
+
+**Fones que não mudam com a cena:** ligue **Recall Safe** nos AUX dos fones.
+Aí a cena muda o PA e deixa os fones como estão.
+
+**Nome da cena:** a mesa não conta o título da cena, então o nome vem do app.
+Nos ajustes, em "Cenas da mesa", dê um nome para cada número (até 30 letras).
+Nome vazio apaga o nome e deixa só o número.
+
+**Na primeira troca de cena, confira:** nos ajustes, toque em **Copiar
+diagnóstico**. Ele traz o número da cena e a mensagem que a mesa mandou, por
+exemplo `C0 02` (pela tabela de fábrica, a cena 03). **Veja se o número bate
+com o display da mesa e avise quem cuida do programa se não bater**: a conta
+"mensagem → número da cena" segue o manual, mas ainda não foi conferida numa
+01V96 de verdade.
+
 ---
 
 ## Usando no dia a dia
@@ -277,7 +314,8 @@ calibração pelo celular escreve aqui.
     "esperaRespostaMs": 300
   },
   "aplicarEstadoAoIniciar": false,
-  "controles": []
+  "controles": [],
+  "cenas": { "3": "Louvor" }
 }
 ```
 
@@ -287,8 +325,10 @@ calibração pelo celular escreve aqui.
 | `midi.intervaloEnvioMs` | De quanto em quanto tempo o lote de mudanças vai para a mesa |
 | `midi.janelaEcoMs` | Tempo em que o bridge ignora o que a mesa devolve logo depois de um envio, para o fader não tremer na mão |
 | `midi.intervaloProcuraMs` | De quanto em quanto tempo ele confere se a mesa sumiu ou apareceu no cabo (padrão 10000, dez segundos) |
-| `midi.esperaRespostaMs` | Ao criar canais de uma vez, quanto tempo ele espera a mesa responder cada canal antes de dar como "sem resposta" (padrão 300) |
+| `midi.esperaRespostaMs` | Ao criar canais de uma vez ou reler os faders depois de uma troca de cena, quanto tempo ele espera a mesa responder cada pedido antes de dar como "sem resposta" (padrão 300) |
+| `midi.esperaCenaMs` | Depois da última mensagem de troca de cena, quanto ele espera a mesa assentar antes de reler os faders (padrão 400). Aumente se a cena usa fade |
 | `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar. É o que o botão "devolver o meu mix" do app liga e desliga |
+| `cenas` | Nome de cada cena, pelo número (`"3": "Louvor"`). O app escreve aqui quando você dá nome a uma cena |
 
 Cada controle calibrado fica assim:
 
@@ -329,6 +369,7 @@ Celular para o bridge:
 { "type": "controle:renomear", "control": "canal-5", "label": "Teclado" }
 { "type": "gerar:canais", "base": "bumbo", "canais": [2, 3, 4, 5] }
 { "type": "config:devolverMix", "ligado": true }
+{ "type": "cena:nomear", "numero": 3, "nome": "Louvor" }
 ```
 
 Bridge para o celular:
@@ -344,10 +385,24 @@ Bridge para o celular:
 { "type": "gerar:fim", "criados": [ { "id": "canal-2", "label": "Canal 2", "canal": 2 } ], "semResposta": [4], "jaExistiam": [], "interrompido": false }
 { "type": "gerar:erro", "message": "Ligue a mesa no cabo USB: ..." }
 { "type": "controle:erro", "message": "Escreva um nome para o controle." }
+{ "type": "cena", "atual": { "numero": 3, "nome": "Louvor", "em": "2026-10-05T19:02:11.000Z", "origem": "programa", "bruto": "C0 02" }, "nomes": { "3": "Louvor" }, "vistas": [1, 3] }
+{ "type": "cena:relida", "numero": 3, "lidos": ["bumbo", "caixa"], "semResposta": ["volume-geral"] }
 ```
 
-Ao conectar, o celular recebe os três primeiros. Depois disso, toda mudança
-vira um `state` enviado para os outros celulares, mantendo todo mundo igual.
+Ao conectar, o celular recebe os três primeiros e a `cena`. Depois disso, toda
+mudança vira um `state` enviado para os outros celulares, mantendo todo mundo
+igual.
+
+`cena` vai para todos a cada troca de cena na mesa e a cada nome dado. `atual`
+é `null` enquanto nenhuma cena foi vista; `nome` é `null` se a cena não tem
+nome; `origem` diz por onde a mesa avisou (`programa` = Program Change,
+`funcao` = SysEx de função SCENE RECALL) e `bruto` é a mensagem como chegou.
+`vistas` são os números já vistos, em ordem. Depois de reler os faders, os
+valores chegam pelo `state` de sempre e, em seguida, `cena:relida` com os ids
+lidos e os que ficaram sem resposta. Sem mesa no cabo, a cena é só registrada
+(sem `cena:relida`). Erro ao dar nome (número fora de 0 a 99, nome que não é
+texto) volta como `controle:erro`. Em `/api/status`, o campo `cena` traz
+`numero`, `origem`, `bruto` e `em` para o diagnóstico.
 
 O campo `canal` só vem nos controles que servem de modelo para criar os
 outros. `gerar:progresso`, `gerar:fim` e os erros vão só para o celular que
@@ -370,6 +425,11 @@ enquanto os canais estão sendo criados).
 | O app pede para esperar antes de calibrar ou de criar canais | Calibrar e criar canais não rodam ao mesmo tempo. Espere o outro terminar (ou cancele a calibração aberta) e tente de novo |
 | Ao criar canais, diz que o controle "não está no formato do manual" | Aquele canal não serve de modelo. Calibre os canais um a um |
 | O fader "Canal 5" mexe em outro canal da mesa | Apague os canais criados, calibre um a um e mande o diagnóstico do app para quem cuida do programa |
+| A equipe troca a cena e o app não mostra | `PROGRAM CHANGE` **Tx** desligado (MIDI \| Setup), ou **Tx PORT** diferente de `USB` (DIO/Setup > MIDI/Host) |
+| O número da cena no app não bate com o display da mesa | Tabela Pgm Asgn mudada pela equipe (`INITIALIZE` volta ao padrão de fábrica). Se a tabela é a de fábrica, mande o "Copiar diagnóstico" para quem cuida do programa |
+| A cena aparece, mas os faders não acompanham | Parameter Change **RX** desligado, ou **Rx CH** diferente do Device ID. Controle fora do formato do manual não é relido: calibre de novo |
+| Os fones mudam toda vez que trocam a cena | Ligue **Recall Safe** nos AUX dos fones |
+| Logo depois de trocar a cena, o app pede para esperar antes de calibrar ou criar canais | Ele está relendo os faders na mesa. Espere uns segundos e tente de novo |
 | Rodapé diz "sem mesa conectada" | Confira o cabo USB e se a mesa está ligada. Se houver mais de um aparelho MIDI, escolha a porta no botão de ajustes do app |
 | O fader treme sozinho | Desligue o **ECHO** de Parameter Change na mesa, ou aumente `janelaEcoMs` |
 | O endereço mudou de uma semana para outra | Reserve o IP da máquina no roteador |

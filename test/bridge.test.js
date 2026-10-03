@@ -79,10 +79,16 @@ async function mesaManda(porta, bytes) {
 async function conectarCelular(porta) {
   const ws = new WebSocket('ws://127.0.0.1:' + porta);
   const recebidas = [];
-  ws.on('message', (dados) => recebidas.push(JSON.parse(dados.toString())));
+  const todas = []; // tudo que chegou, na ordem, para conferir sequencia
+  ws.on('message', (dados) => {
+    const msg = JSON.parse(dados.toString());
+    recebidas.push(msg);
+    todas.push(msg);
+  });
   await new Promise((ok, erro) => { ws.once('open', ok); ws.once('error', erro); });
 
   return {
+    todas,
     enviar: (objeto) => ws.send(JSON.stringify(objeto)),
     /** Tira da fila a primeira mensagem desse tipo que passe no filtro. */
     receber(tipo, filtro = () => true, ms) {
@@ -394,6 +400,55 @@ test('remover um controle tira ele do app e do config.json', async () => {
   assert.deepEqual(gravado.controles.map((c) => c.id), ['bumbo']);
 });
 
+/** Le o estado.json sem ficar em cima do arquivo (no Windows, ler junto com o rename do bridge o faria falhar). */
+async function esperarEstadoSalvo(pasta, condicao, descricao) {
+  const arquivo = path.join(pasta, 'estado.json');
+  const limite = Date.now() + 6000;
+  while (Date.now() < limite) {
+    try {
+      const dados = JSON.parse(fs.readFileSync(arquivo, 'utf8'));
+      if (condicao(dados)) return dados;
+    } catch { /* ainda nao gravou */ }
+    await pausa(300);
+  }
+  throw new Error('estado.json nao chegou a ter ' + descricao);
+}
+
+test('sem mesa no cabo, a troca de cena so e registrada: nada vai para a mesa', async () => {
+  await pausa(INTERVALO_IMPRESSAO);
+  celularA.esquecer();
+  celularB.esquecer();
+  const desde = bridge.linhas.length;
+
+  // Ja existe controle calibrado (bumbo), mas sem mesa nao ha o que reler.
+  await mesaManda(bridge.porta, [0xc0, 0x02]);
+  for (const celular of [celularA, celularB]) {
+    const m = await celular.receber('cena', (x) => x.atual && x.atual.numero === 3);
+    assert.deepEqual({ ...m.atual, em: typeof m.atual.em },
+      { numero: 3, nome: null, em: 'string', origem: 'programa', bruto: 'C0 02' });
+    assert.deepEqual(m.vistas, [3]);
+  }
+
+  // Programa #101 nao tem cena na tabela de fabrica: nao vira cena, fica no diagnostico.
+  await mesaManda(bridge.porta, [0xc0, 0x64]);
+  await pausa(700); // passa a espera da releitura (400 ms)
+  assert.equal(celularA.viu('cena'), false);
+  assert.equal(celularA.viu('cena:relida'), false);
+  assert.deepEqual(enviosDesde(desde), [], 'saiu pedido para a mesa sem mesa');
+
+  const status = JSON.parse((await pedir(bridge.porta, 'GET', '/api/status')).texto);
+  assert.deepEqual({ ...status.cena, em: typeof status.cena.em },
+    { numero: 3, origem: 'programa', bruto: 'C0 02', em: 'string' });
+  assert.ok(status.avisos.some((l) => l.includes('Program Change sem cena') && l.includes('C0 64')));
+
+  // A cena fica no estado.json, com a hora, para sobreviver a reinicio.
+  const salvo = await esperarEstadoSalvo(bridge.pasta,
+    (d) => d.cena && d.cena.atual && d.cena.atual.numero === 3, 'a cena 3');
+  assert.deepEqual(salvo.cena.vistas, [3]);
+  assert.equal(salvo.cena.atual.em, status.cena.em);
+  assert.equal(salvo.cena.atual.bruto, 'C0 02');
+});
+
 test('o ultimo mix vai para o estado.json da pasta de dados', async () => {
   // O bridge grava 2 s depois da ultima mudanca; a primeira gravacao pode
   // ser de antes do bumbo existir, entao espera a que ja tem ele.
@@ -417,8 +472,14 @@ test('o ultimo mix vai para o estado.json da pasta de dados', async () => {
  *
  * Ela tambem responde Parameter request (F0 43 3n ...) como o manual descreve:
  * devolve, pelas entradas abertas, o Parameter change do mesmo endereco com o
- * valor de "respostas" no arquivo ({ "2": [0, 64] } = canal 2 responde 64).
- * Canal ausente em "respostas" = a mesa fica calada.
+ * valor de "enderecos" no arquivo ({ "0D 01 1C 00 00": [0, 64] }, bytes 4 a 8
+ * do pedido) ou, sem ele, de "respostas" ({ "2": [0, 64] } = canal 2 responde
+ * 64). Ausente nos dois = a mesa fica calada. "atrasos" ({ endereco: ms })
+ * faz a resposta daquele endereco demorar.
+ *
+ * E faz a mesa falar sozinha, como quando a equipe chama uma cena: cada item
+ * novo da fila "emitir" ([[1, "C0 02"], [2, "F0 43 ..."]]) vai uma vez, em
+ * ordem, para as entradas abertas (o arquivo e lido a cada 15 ms).
  */
 const MESA_FALSA = `
 const Module = require('module');
@@ -428,15 +489,29 @@ function mesa() {
   try { return JSON.parse(fs.readFileSync(ARQUIVO, 'utf8')); } catch { return { portas: [], geracao: 0 }; }
 }
 const entradasAbertas = new Set();
+const hex = (bytes) => bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+function entregar(quadro) {
+  for (const entrada of entradasAbertas) if (entrada.aoReceber) entrada.aoReceber(0, quadro.slice());
+}
 function responderPedido(bytes) {
   if ((bytes[2] & 0xf0) !== 0x30) return;
-  const valor = (mesa().respostas || {})[String(bytes[8] + 1)];
+  const m = mesa();
+  const endereco = hex(bytes.slice(4, 9));
+  const porEndereco = (m.enderecos || {})[endereco];
+  const valor = Array.isArray(porEndereco) ? porEndereco : (m.respostas || {})[String(bytes[8] + 1)];
   if (!Array.isArray(valor)) return;
   const quadro = [0xf0, 0x43, 0x10 | (bytes[2] & 0x0f), ...bytes.slice(3, 9), ...valor, 0xf7];
-  setTimeout(() => {
-    for (const entrada of entradasAbertas) if (entrada.aoReceber) entrada.aoReceber(0, quadro);
-  }, 5);
+  const atraso = (m.atrasos || {})[endereco];
+  setTimeout(() => entregar(quadro), Number.isFinite(atraso) ? atraso : 5);
 }
+let emitidos = 0;
+setInterval(() => {
+  for (const [n, texto] of mesa().emitir || []) {
+    if (n <= emitidos) continue;
+    emitidos = n;
+    entregar(texto.split(' ').map((h) => parseInt(h, 16)));
+  }
+}, 15).unref();
 class Porta {
   getPortCount() { return mesa().portas.length; }
   getPortName(i) { return mesa().portas[i] || ''; }
@@ -746,6 +821,320 @@ test('criar os outros canais: so nasce controle no canal que a mesa confirmou', 
     });
   } finally {
     celular.fechar();
+    await b.parar();
+    mesaTeste.apagar();
+  }
+});
+
+test('a ultima cena e os nomes voltam depois de reiniciar o programa', async () => {
+  const em = '2026-10-05T10:00:00.000Z';
+  const b = await subirBridge({
+    config: {
+      midi: { entrada: 'simulado', saida: 'simulado' },
+      controles: [],
+      // So o que e valido chega no app: numero de 0 a 99 e nome com texto.
+      cenas: { 3: 'Pedro', 120: 'Nao existe', 5: '   ', 7: 42 }
+    },
+    estado: {
+      valores: {},
+      mutes: {},
+      cena: { atual: { numero: 3, em, origem: 'programa', bruto: 'C0 02' }, vistas: [5, 3, 3, 200, 'x'] }
+    }
+  });
+  const celular = await conectarCelular(b.porta);
+  try {
+    assert.deepEqual(await celular.receber('cena'), {
+      type: 'cena',
+      atual: { numero: 3, nome: 'Pedro', em, origem: 'programa', bruto: 'C0 02' },
+      nomes: { 3: 'Pedro' },
+      vistas: [3, 5]
+    });
+    const status = JSON.parse((await pedir(b.porta, 'GET', '/api/status')).texto);
+    assert.deepEqual(status.cena, { numero: 3, origem: 'programa', bruto: 'C0 02', em });
+  } finally {
+    celular.fechar();
+    await b.parar();
+  }
+});
+
+test('troca de cena na mesa: o app mostra a cena e rele os faders so com pedidos de leitura', async (t) => {
+  const mesaTeste = prepararMesaFalsa();
+  const PORTAS = ['Microsoft GS Wavetable Synth', 'YAMAHA 01V96'];
+
+  const bumbo = { id: 'bumbo', rotulo: 'Bumbo', tipo: 'canal', calibrado: true,
+    template: MINIMO, valueOffset: 9, valueLength: 2, rawMin: 0, rawMax: 255 };
+  const caixa = { id: 'caixa', rotulo: 'Caixa', tipo: 'canal', ...mesa.controleParaCanal(bumbo, 2) };
+  const reverb = { ...bumbo, id: 'reverb', rotulo: 'Reverb', tipo: 'reverb',
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x1d, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+  // Volume geral: cc fora de 0..31, nao serve de modelo de canal, mas e relido.
+  const master = { ...bumbo, id: 'master', rotulo: 'Volume geral', tipo: 'master',
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x0d, 0x01, 0x20, 0x00, 0x40, 0x00, 0x00, 0xf7] };
+  // Fora do formato do manual e sem calibracao: nunca sao pedidos.
+  const estranho = { ...bumbo, id: 'estranho', rotulo: 'Estranho',
+    template: [0xf0, 0x43, 0x10, 0x3e, 0x7e, 0x01, 0x1c, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+  const guitarra = { id: 'guitarra', rotulo: 'Guitarra', tipo: 'canal', calibrado: false };
+
+  const endereco = (c) => mesa.paraHex(c.template.slice(4, 9));
+  const pedido = (c) => mesa.montarPedidoDoControle(c);
+  const TODOS = [pedido(bumbo), pedido(caixa), pedido(reverb), pedido(master)];
+  // Bumbo 64, caixa 128, reverb no maximo; o volume geral fica calado.
+  const VALORES = {
+    [endereco(bumbo)]: [0x00, 0x40],
+    [endereco(caixa)]: [0x01, 0x00],
+    [endereco(reverb)]: [0x01, 0x7f]
+  };
+
+  let atual = { portas: PORTAS, geracao: 1, enderecos: VALORES, atrasos: {}, emitir: [] };
+  let seq = 0;
+  const mesaFica = (mudancas) => {
+    atual = { ...atual, ...mudancas };
+    mesaTeste.fica(atual);
+  };
+  /** A mesa manda essas mensagens sozinha, na ordem (como ao chamar uma cena). */
+  const mesaEmite = (...mensagens) => mesaFica({ emitir: [...atual.emitir, ...mensagens.map((h) => [++seq, h])] });
+  mesaFica({});
+
+  const b = await subirBridge({
+    config: {
+      midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
+        intervaloProcuraMs: 100, esperaRespostaMs: 300 },
+      aplicarEstadoAoIniciar: false,
+      controles: [bumbo, caixa, reverb, master, estranho, guitarra]
+    },
+    // O bumbo estava mudo no app: a cena nova tem som nele, entao o mudo sai.
+    estado: { valores: { bumbo: 0.9 }, mutes: { bumbo: true } },
+    antes: ['--require', mesaTeste.preload],
+    env: { MESA_FALSA: mesaTeste.arquivo }
+  });
+  const celular = await conectarCelular(b.porta);
+  const outro = await conectarCelular(b.porta);
+  const lerConfig = () => JSON.parse(fs.readFileSync(path.join(b.pasta, 'config.json'), 'utf8'));
+  const quadrosDesde = (desde) => quadrosParaMesa(b.linhas, desde);
+  const soPedidos = (quadros) => {
+    for (const q of quadros) assert.equal(q[2] & 0xf0, 0x30, 'saiu algo que nao e pedido: ' + mesa.paraHex(q));
+  };
+  const cenaNumero = (n) => (m) => m.atual !== null && m.atual.numero === n;
+
+  try {
+    assert.equal((await celular.receber('status')).midi.simulado, false);
+    assert.deepEqual(await celular.receber('cena'), { type: 'cena', atual: null, nomes: {}, vistas: [] });
+
+    await t.test('a mesa chama uma cena: todos recebem o numero e a mensagem bruta, e os faders sao relidos', async () => {
+      celular.esquecer();
+      const marca = celular.todas.length;
+      const desde = b.linhas.length;
+      mesaEmite('C0 02');
+
+      for (const c of [celular, outro]) {
+        const m = await c.receber('cena', cenaNumero(3));
+        assert.deepEqual({ ...m.atual, em: typeof m.atual.em },
+          { numero: 3, nome: null, em: 'string', origem: 'programa', bruto: 'C0 02' });
+        assert.ok(!Number.isNaN(Date.parse(m.atual.em)));
+        assert.deepEqual(m.vistas, [3]);
+        assert.deepEqual(m.nomes, {});
+      }
+
+      const relida = await celular.receber('cena:relida', () => true, 5000);
+      assert.deepEqual(relida,
+        { type: 'cena:relida', numero: 3, lidos: ['bumbo', 'caixa', 'reverb'], semResposta: ['master'] });
+
+      // Os valores vem pelo "state" de sempre, antes do aviso de fim.
+      const depois = celular.todas.slice(marca);
+      const iState = depois.findIndex((m) => m.type === 'state' && 'bumbo' in m.values);
+      const iRelida = depois.findIndex((m) => m.type === 'cena:relida');
+      assert.ok(iState >= 0 && iState < iRelida, 'state depois do cena:relida');
+      assert.deepEqual(depois[iState].values, { bumbo: 64 / 255, caixa: 128 / 255, reverb: 1 });
+      assert.deepEqual(depois[iState].mutes, { bumbo: false, caixa: false, reverb: false });
+      await outro.receber('state', (m) => m.values.bumbo === 64 / 255);
+
+      // Seguranca: um pedido de leitura por controle no formato do manual, e
+      // nenhum Parameter change, nem depois.
+      await pausa(300);
+      const quadros = quadrosDesde(desde);
+      assert.deepEqual(quadros, TODOS);
+      soPedidos(quadros);
+
+      // "Copiar diagnostico" mostra o numero e a mensagem bruta.
+      const status = JSON.parse((await pedir(b.porta, 'GET', '/api/status')).texto);
+      assert.deepEqual({ ...status.cena, em: typeof status.cena.em },
+        { numero: 3, origem: 'programa', bruto: 'C0 02', em: 'string' });
+    });
+
+    await t.test('Program Change e SysEx do mesmo recall contam uma vez so', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      mesaEmite('C0 03', 'F0 43 10 3E 7F 10 01 00 04 00 00 F7');
+
+      const m = await celular.receber('cena', cenaNumero(4));
+      assert.equal(m.atual.origem, 'programa');
+      assert.equal(m.atual.bruto, 'C0 03');
+      assert.equal((await celular.receber('cena:relida', () => true, 5000)).numero, 4);
+      await pausa(400);
+      assert.equal(celular.viu('cena'), false, 'o mesmo recall virou duas trocas');
+      assert.equal(celular.viu('cena:relida'), false, 'releu duas vezes');
+      assert.deepEqual(quadrosDesde(desde), TODOS);
+
+      // So o SysEx de funcao (Program Change que nao vale para a cena).
+      mesaEmite('F0 43 10 3E 7F 10 01 00 0A 00 00 F7');
+      const f = await celular.receber('cena', cenaNumero(10));
+      assert.equal(f.atual.origem, 'funcao');
+      assert.equal(f.atual.bruto, 'F0 43 10 3E 7F 10 01 00 0A 00 00 F7');
+      assert.deepEqual(f.vistas, [3, 4, 10]);
+      await celular.receber('cena:relida', (x) => x.numero === 10, 5000);
+    });
+
+    await t.test('relendo, calibrar e criar canais sao recusados; troca nova no meio reinicia a releitura', async () => {
+      mesaFica({ enderecos: {} }); // mesa calada: cada pedido espera 300 ms
+      celular.esquecer();
+      const desde = b.linhas.length;
+      mesaEmite('C0 04'); // cena 5
+      await esperarAte(() => quadrosDesde(desde).length >= 1, 'primeiro pedido da releitura');
+
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [3] });
+      assert.match((await celular.receber('gerar:erro')).message, /relendo a mesa/);
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Teclado', kind: 'canal' });
+      assert.deepEqual(await celular.receber('learn:erro'), {
+        type: 'learn:erro',
+        message: 'Estou relendo a mesa depois da troca de cena. Espere uns segundos para calibrar.',
+        etapa: 'nome'
+      });
+
+      mesaEmite('C0 05'); // cena 6, com a releitura da 5 no meio
+      await celular.receber('cena', cenaNumero(6));
+      const relida = await celular.receber('cena:relida', () => true, 5000);
+      assert.deepEqual(relida,
+        { type: 'cena:relida', numero: 6, lidos: [], semResposta: ['bumbo', 'caixa', 'reverb', 'master'] });
+      assert.equal(celular.viu('cena:relida'), false, 'a releitura interrompida da cena 5 avisou fim');
+      assert.equal(celular.viu('learn:pronto-para'), false);
+
+      const quadros = quadrosDesde(desde);
+      soPedidos(quadros);
+      assert.deepEqual(quadros.slice(-4), TODOS, 'a releitura da cena 6 recomecou do primeiro controle');
+      assert.ok(quadros.length < 8, 'a releitura da cena 5 foi ate o fim: ' + quadros.length);
+    });
+
+    await t.test('com calibracao aberta, a releitura espera e a cena nao vira quadro de calibracao', async () => {
+      mesaFica({ enderecos: VALORES });
+      celular.esquecer();
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Teclado', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      const desde = b.linhas.length;
+
+      try {
+        mesaEmite('C0 06', 'F0 43 10 3E 7F 10 01 00 07 00 00 F7'); // cena 7, pelas duas vias
+        await celular.receber('cena', cenaNumero(7));
+        await pausa(700); // passa a espera da releitura
+        assert.equal(celular.viu('learn:midi'), false, 'mensagem de cena chegou na calibracao');
+        assert.deepEqual(quadrosDesde(desde), [], 'releu com a calibracao aberta');
+
+        // A calibracao nao guardou nada da cena: capturar ainda pede para mexer na mesa.
+        celular.enviar({ type: 'learn:capturar', step: 'min' });
+        assert.match((await celular.receber('learn:erro')).message, /Parameter Change TX/);
+      } finally {
+        // Calibracao cancelada: a releitura que esperava roda agora.
+        celular.enviar({ type: 'learn:cancelar' });
+      }
+      assert.equal((await celular.receber('cena:relida', () => true, 5000)).numero, 7);
+      assert.deepEqual(quadrosDesde(desde), TODOS);
+    });
+
+    await t.test('resposta atrasada nao cai no controle seguinte nem na calibracao aberta logo depois', async () => {
+      // O bumbo responde 1,2 s depois do pedido (a espera e 300 ms), com outro valor.
+      mesaFica({ enderecos: { ...VALORES, [endereco(bumbo)]: [0x00, 0x11] }, atrasos: { [endereco(bumbo)]: 1200 } });
+      celular.esquecer();
+      mesaEmite('C0 07'); // cena 8
+
+      const relida = await celular.receber('cena:relida', (x) => x.numero === 8, 5000);
+      assert.deepEqual(relida.lidos, ['caixa', 'reverb']);
+      assert.deepEqual(relida.semResposta, ['bumbo', 'master']);
+      const lidos = await celular.receber('state', (m) => 'caixa' in m.values);
+      assert.deepEqual(lidos.values, { caixa: 128 / 255, reverb: 1 }, 'a resposta do bumbo caiu em outro controle');
+
+      // Calibracao aberta logo em seguida: a resposta atrasada do bumbo chega
+      // durante ela e vale so como o valor do proprio bumbo.
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Teclado', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      try {
+        const atrasada = await celular.receber('state', (m) => 'bumbo' in m.values, 3000);
+        assert.equal(atrasada.values.bumbo, 0x11 / 255);
+        assert.equal(celular.viu('learn:midi'), false, 'a resposta atrasada virou quadro de calibracao');
+        celular.enviar({ type: 'learn:capturar', step: 'min' });
+        assert.match((await celular.receber('learn:erro')).message, /Parameter Change TX/);
+      } finally {
+        celular.enviar({ type: 'learn:cancelar' });
+        mesaFica({ enderecos: VALORES, atrasos: {} });
+      }
+    });
+
+    await t.test('criando canais, a releitura espera a criacao terminar', async () => {
+      celular.esquecer();
+      const marca = celular.todas.length;
+      const desde = b.linhas.length;
+
+      // Canais 20 e 21 calados: a criacao fica 2 x 300 ms esperando a mesa.
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [20, 21] });
+      await esperarAte(() => quadrosDesde(desde).length >= 1, 'primeiro pedido da criacao');
+      mesaEmite('C0 08'); // cena 9
+      await celular.receber('cena', cenaNumero(9));
+
+      assert.deepEqual((await celular.receber('gerar:fim', () => true, 5000)).semResposta, [20, 21]);
+      const relida = await celular.receber('cena:relida', (x) => x.numero === 9, 5000);
+      assert.deepEqual(relida.lidos, ['bumbo', 'caixa', 'reverb']);
+
+      const ordem = celular.todas.slice(marca).map((m) => m.type);
+      assert.ok(ordem.indexOf('gerar:fim') < ordem.indexOf('cena:relida'));
+      // Na mesa: primeiro os pedidos da criacao, depois os da releitura, sem misturar.
+      const quadros = quadrosDesde(desde);
+      assert.deepEqual(quadros, [mesa.montarPedido(bumbo, 20), mesa.montarPedido(bumbo, 21), ...TODOS]);
+      soPedidos(quadros);
+    });
+
+    await t.test('dar nome a cena: todos recebem e fica no config.json', async () => {
+      celular.esquecer();
+      outro.esquecer();
+
+      celular.enviar({ type: 'cena:nomear', numero: 3, nome: '  Pedro  ' });
+      let m = await outro.receber('cena', (x) => x.nomes['3'] === 'Pedro');
+      assert.deepEqual(m.nomes, { 3: 'Pedro' });
+      assert.deepEqual({ numero: m.atual.numero, nome: m.atual.nome }, { numero: 9, nome: null });
+      await celular.receber('cena', (x) => x.nomes['3'] === 'Pedro'); // quem pediu tambem recebe
+      assert.deepEqual(lerConfig().cenas, { 3: 'Pedro' });
+
+      // A cena atual com nome; no maximo 30 letras.
+      const longo = 'Louvor ' + 'x'.repeat(40);
+      celular.enviar({ type: 'cena:nomear', numero: 9, nome: longo });
+      m = await outro.receber('cena', (x) => '9' in x.nomes);
+      assert.equal(m.atual.nome, longo.slice(0, 30));
+      assert.deepEqual(lerConfig().cenas, { 3: 'Pedro', 9: longo.slice(0, 30) });
+
+      // Nome vazio apaga.
+      celular.enviar({ type: 'cena:nomear', numero: 3, nome: '   ' });
+      await outro.receber('cena', (x) => !('3' in x.nomes));
+      assert.deepEqual(lerConfig().cenas, { 9: longo.slice(0, 30) });
+
+      for (const msg of [{ numero: 100, nome: 'x' }, { numero: -1, nome: 'x' }, { numero: 1.5, nome: 'x' },
+        { numero: '3', nome: 'x' }, { nome: 'x' }, { numero: 3, nome: 42 }]) {
+        celular.enviar({ type: 'cena:nomear', ...msg });
+        assert.match((await celular.receber('controle:erro')).message, /Cena invalida|texto/, JSON.stringify(msg));
+      }
+      await pausa(100);
+      assert.equal(outro.viu('controle:erro'), false);
+      assert.deepEqual(lerConfig().cenas, { 9: longo.slice(0, 30) }, 'pedido invalido mexeu no config');
+      // A calibracao continua inteira no config.json.
+      assert.deepEqual(lerConfig().controles.map((c) => c.id),
+        ['bumbo', 'caixa', 'reverb', 'master', 'estranho', 'guitarra']);
+    });
+
+    await t.test('a ultima cena vista fica no estado.json', async () => {
+      const salvo = await esperarEstadoSalvo(b.pasta,
+        (d) => d.cena && d.cena.atual && d.cena.atual.numero === 9, 'a cena 9');
+      assert.deepEqual(salvo.cena.vistas, [3, 4, 5, 6, 7, 8, 9, 10]);
+      assert.equal(salvo.cena.atual.origem, 'programa');
+      assert.equal(salvo.cena.atual.bruto, 'C0 08');
+    });
+  } finally {
+    celular.fechar();
+    outro.fechar();
     await b.parar();
     mesaTeste.apagar();
   }
