@@ -70,7 +70,9 @@ function atualizarRodape() {
 
   const partes = [];
   if (statusMidi) {
-    partes.push(statusMidi.simulado ? 'sem mesa conectada (nada sai daqui)' : 'mesa: ' + statusMidi.saida);
+    partes.push(statusMidi.simulado
+      ? 'sem mesa conectada (nada sai daqui)'
+      : 'mesa: ' + statusMidi.saida + (mesa.rota ? ', canal MIDI ' + mesa.rota.canalMidi : ''));
   }
   const semCalibrar = listaControles.filter((c) => !c.calibrated).length;
   if (semCalibrar) partes.push(semCalibrar + ' sem calibrar (*)');
@@ -230,6 +232,9 @@ function desenharControles(lista) {
     desenharListaAjustes();
     desenharGerar();
   }
+  // A lista nova chega logo depois do learn:salvo, e e ela que diz se o canal
+  // salvo ficou no formato do manual.
+  if (assistente.ativo && assistente.etapa === 'fim') desenharOfertaPuxar();
 }
 
 function aplicarEstado(valores, mutes) {
@@ -329,9 +334,15 @@ function conectar() {
       case 'status':
         statusMidi = msg.midi || null;
         elDevolverMix.checked = msg.devolverMix === true;
+        // Bridge sem o teste da mesa nao manda 'rota': fica como estava.
+        if ('rota' in msg) mesa.rota = rotaDoBridge(msg.rota);
         atualizarRodape();
         desenharEstadoDaMesa();
+        desenharTesteDaMesa();
         desenharGerar();
+        break;
+      case 'mesa:teste':
+        receberTesteDaMesa(msg);
         break;
       case 'midi:portas':
         desenharPortasDaMesa(msg);
@@ -342,6 +353,12 @@ function conectar() {
         receberDaGeracao(msg);
         break;
       case 'controle:erro':
+        // Com o teste da mesa pedido e ainda sem resposta, e o bridge dizendo
+        // que nao da para testar agora (relendo a cena, sem molde, ocupado).
+        if (mesa.fase === 'pedido') {
+          recusarTeste(msg.message);
+          break;
+        }
         // Tambem chega aqui o erro de dar nome a uma cena.
         alert(msg.message || 'Não consegui mudar esse controle.');
         break;
@@ -366,6 +383,13 @@ function conectar() {
     // bridge contar de novo, logo que reconectar.
     limparAviso();
     desenharCena();
+    // O resultado de um teste que estava rodando chega para quem esta
+    // conectado; daqui nao da para saber. Na volta, o status conta a rota.
+    if (testeEmAndamento()) {
+      clearTimeout(mesa.vigia);
+      mesa.fase = null;
+    }
+    desenharTesteDaMesa();
     atualizarRodape();
     atualizarVazio();
     atualizarBotaoAjustes();
@@ -529,7 +553,11 @@ function renomearControle(controle) {
 
 const TOTAL_CANAIS = 32;
 const ESPERA_MAX_GERAR = 20000; // sem noticia do bridge por tanto tempo = travou
+const DICA_DURACAO_TESTE = 'O teste pode levar até uns 20 segundos; depois a conferência começa sozinha.';
 
+const elBlocoGerar = document.getElementById('blocoGerar');
+const elBtnPuxarTodos = document.getElementById('btnPuxarTodos');
+const elGerarOuEscolha = document.getElementById('gerarOuEscolha');
 const elGerarExplica = document.getElementById('gerarExplica');
 const elGerarGrade = document.getElementById('gerarGrade');
 const elGerarContagem = document.getElementById('gerarContagem');
@@ -548,12 +576,15 @@ const elBtnGerar = document.getElementById('btnGerar');
 const gerar = {
   ativo: false,
   marcados: new Set(),  // canais escolhidos na grade
+  base: null,           // id do molde da conferencia em andamento
   enviados: [],         // o que foi pedido na ultima conferencia
   feitos: 0,
   total: 0,
   resumo: '',
   erro: '',
   vigia: null,
+  aguardandoTeste: false, // pedido feito durante o teste da mesa: sai quando ele acabar
+  paradoPeloTeste: false, // encerrada porque o teste da mesa falhou
   segurarFolha: false   // a conexao caiu no meio: a folha so fecha pela pessoa
 };
 
@@ -576,6 +607,14 @@ function canaisQueJaExistem() {
     if (n) usados.add(n);
   }
   return usados;
+}
+
+/** Canais 1..32 que ainda nao estao no monitor, em ordem. */
+function canaisLivres() {
+  const existentes = canaisQueJaExistem();
+  const livres = [];
+  for (let n = 1; n <= TOTAL_CANAIS; n++) if (!existentes.has(n)) livres.push(n);
+  return livres;
 }
 
 /** Motivo para nao poder conferir agora, ou '' quando a mesa pode responder. */
@@ -614,10 +653,16 @@ function desenharGerar() {
 
   const existentes = canaisQueJaExistem();
   for (const n of existentes) gerar.marcados.delete(n);
+  const livres = TOTAL_CANAIS - existentes.size;
 
-  elGerarExplica.textContent =
-    'Usa "' + base.label + '" (canal ' + base.canal + '), que já está calibrado, como molde. ' +
-    'Antes de criar, confere cada canal marcado com a mesa. Nada muda no som enquanto confere.';
+  elGerarExplica.textContent = livres === 0 && !gerar.ativo
+    ? 'Os ' + TOTAL_CANAIS + ' canais da mesa já estão no seu monitor.'
+    : 'Usa "' + base.label + '" (canal ' + base.canal + '), que já está calibrado, como molde. ' +
+      'Antes de criar, confere cada canal com a mesa. Nada muda no som enquanto confere.';
+
+  // Sem canal livre nao ha o que puxar nem o que escolher.
+  elBtnPuxarTodos.hidden = livres === 0 && !gerar.ativo;
+  elGerarOuEscolha.hidden = livres === 0;
 
   // Grade: os 32 botoes nascem uma vez e so mudam de estado, para o foco do
   // teclado nao se perder a cada toque.
@@ -655,7 +700,15 @@ function desenharGerar() {
   // Progresso (o texto e aria-live; a barra e um progressbar de verdade)
   elGerarProgresso.hidden = !gerar.ativo;
   if (gerar.ativo) {
-    const texto = 'conferindo com a mesa: ' + gerar.feitos + ' de ' + gerar.total;
+    // Enquanto o bridge testa o caminho (pedido na espera, ou a conferencia
+    // que disparou o teste), nenhum canal foi conferido ainda.
+    const testando = gerar.aguardandoTeste || (testeEmAndamento() && gerar.feitos === 0);
+    const texto = testando
+      ? 'testando o caminho até a mesa antes de conferir'
+      : 'conferindo com a mesa: ' + gerar.feitos + ' de ' + gerar.total;
+    // O detalhe do teste sai sozinho: o primeiro progresso troca pelo canal.
+    if (testando) elGerarUltimo.textContent = DICA_DURACAO_TESTE;
+    else if (elGerarUltimo.textContent === DICA_DURACAO_TESTE) elGerarUltimo.textContent = '';
     // So reescreve quando muda: o leitor de tela anuncia cada troca.
     if (elGerarProgressoTexto.textContent !== texto) elGerarProgressoTexto.textContent = texto;
     elGerarBarra.style.width = (gerar.total ? Math.round((gerar.feitos / gerar.total) * 100) : 0) + '%';
@@ -678,6 +731,8 @@ function desenharGerar() {
   elGerarMotivo.hidden = !mostrarMotivo;
   elBtnGerar.disabled = gerar.ativo || !!motivo || qtd === 0;
   elBtnGerar.textContent = gerar.ativo ? 'Conferindo com a mesa' : 'Conferir com a mesa e criar';
+  // O texto fica: o medidor logo abaixo ja conta o andamento.
+  elBtnPuxarTodos.disabled = gerar.ativo || !!motivo || livres === 0;
 }
 
 elGerarGrade.addEventListener('click', (ev) => {
@@ -710,41 +765,70 @@ elGerarAtalhos.addEventListener('click', (ev) => {
   desenharGerar();
 });
 
-elBtnGerar.addEventListener('click', () => {
+elBtnGerar.addEventListener('click', () => iniciarGerar());
+
+elBtnPuxarTodos.addEventListener('click', () => {
+  if (gerar.ativo) return;
+  marcarTodosLivres();
+  iniciarGerar();
+});
+
+function marcarTodosLivres() {
+  gerar.marcados = new Set(canaisLivres());
+}
+
+/**
+ * Comeca a conferencia dos canais marcados. Devolve false quando nao da
+ * (sem molde, sem mesa, nada marcado); o motivo ja esta na tela.
+ */
+function iniciarGerar() {
   const base = controleBase();
-  if (!base || gerar.ativo || !gerar.marcados.size || motivoMesaIndisponivel()) return;
-  if (!conectado) {
-    alert('Sem conexão com o bridge. Tente de novo quando reconectar.');
-    return;
-  }
+  if (!base || gerar.ativo || !gerar.marcados.size || motivoMesaIndisponivel()) return false;
 
   const canais = [...gerar.marcados].sort((a, b) => a - b);
   gerar.ativo = true;
+  gerar.base = base.id;
   gerar.enviados = canais;
   gerar.feitos = 0;
   gerar.total = canais.length;
   gerar.resumo = '';
   gerar.erro = '';
+  gerar.paradoPeloTeste = false;
   elGerarUltimo.textContent = '';
-  vigiarGerar();
-  enviar({ type: 'gerar:canais', base: base.id, canais });
+
+  // Durante o teste da mesa o bridge recusaria o pedido. Em vez de mostrar
+  // erro, espera o teste acabar e manda sozinho (ver receberTesteDaMesa).
+  gerar.aguardandoTeste = testeEmAndamento();
+  if (gerar.aguardandoTeste) vigiarGerar(ESPERA_MAX_TESTE);
+  else mandarGerar();
+
   desenharGerar();
-});
+  // Quem tocou no botao de baixo tambem precisa ver o andamento, que fica no alto.
+  elGerarProgresso.scrollIntoView({ block: 'nearest' });
+  return true;
+}
+
+function mandarGerar() {
+  gerar.aguardandoTeste = false;
+  vigiarGerar();
+  enviar({ type: 'gerar:canais', base: gerar.base, canais: gerar.enviados });
+}
 
 /** Se o bridge parar de dar noticia, destrava em vez de deixar a tela presa. */
-function vigiarGerar() {
+function vigiarGerar(ms = ESPERA_MAX_GERAR) {
   clearTimeout(gerar.vigia);
   gerar.vigia = setTimeout(() => {
     if (!gerar.ativo) return;
     terminarGerar('', 'O bridge parou de dar notícia da conferência. ' +
       'O que a mesa já confirmou fica salvo; confira a lista acima e marque de novo o que faltou.');
-  }, ESPERA_MAX_GERAR);
+  }, ms);
 }
 
 function terminarGerar(resumo, erro) {
   clearTimeout(gerar.vigia);
   gerar.vigia = null;
   gerar.ativo = false;
+  gerar.aguardandoTeste = false;
   gerar.resumo = resumo;
   gerar.erro = erro;
   desenharGerar();
@@ -807,6 +891,9 @@ function receberDaGeracao(msg) {
   }
 
   if (msg.type === 'gerar:erro') {
+    // Depois de o teste da mesa falhar, o bridge ainda recusa o pedido que
+    // estava esperando; o aviso que aponta o bloco Mesa ajuda mais e fica.
+    if (!gerar.ativo && gerar.paradoPeloTeste) return;
     terminarGerar('', msg.message || 'Não consegui criar os canais.');
   }
 }
@@ -853,6 +940,274 @@ elMesaPorta.addEventListener('change', () => {
   enviar({ type: 'midi:usar', porta: elMesaPorta.value });
 });
 
+/* ---- teste do caminho ate a mesa ---------------------------------------
+   A mesa so obedece no canal MIDI em que RECEBE (Rx), que pode nao ser o
+   mesmo em que ela manda. O bridge acha a porta e o canal so com pedidos de
+   leitura. O teste pode partir daqui, de outro celular ou do proprio bridge
+   (depois da 1a calibracao, quando a mesa conecta): 'mesa:teste' chega para
+   todos, e o estado fica no bloco Mesa e no rodape, sem modal.            */
+
+const ESPERA_RESPOSTA_TESTE = 10000; // o bridge nem comecou o teste pedido
+const ESPERA_MAX_TESTE = 90000;      // testando sem noticia por tanto tempo = travou
+const AVISO_TESTE_OK_MS = 6000;
+const AVISO_TESTE_FALHOU_MS = 12000;
+
+const elMesaRota = document.getElementById('mesaRota');
+const elMesaFalhou = document.getElementById('mesaFalhou');
+const elMesaMotivo = document.getElementById('mesaMotivo');
+const elMesaConferirTitulo = document.getElementById('mesaConferirTitulo');
+const elMesaConferir = document.getElementById('mesaConferir');
+const elMesaTestando = document.getElementById('mesaTestando');
+const elMesaTestados = document.getElementById('mesaTestados');
+const elMesaRecusa = document.getElementById('mesaRecusa');
+const elBtnTestarMesa = document.getElementById('btnTestarMesa');
+
+const mesa = {
+  rota: null,    // { saida, canalMidi, em, reconfirmada } que o bridge usa
+  fase: null,    // null | 'pedido' | 'testando' | 'ok' | 'falhou' | 'parou'
+  faseAntes: null, // resultado que valia antes do pedido (volta se o bridge recusar)
+  testados: 0,
+  motivo: '',
+  conferir: [],  // textos prontos do bridge
+  recusa: '',    // o bridge nao pode testar agora: o motivo dele
+  vigia: null
+};
+
+function rotaValida(rota) {
+  return !!rota && typeof rota === 'object' && typeof rota.saida === 'string' &&
+    Number.isInteger(rota.canalMidi) && rota.canalMidi >= 1 && rota.canalMidi <= 16;
+}
+
+/**
+ * Rota que o bridge conferiu, ou a anterior que ele manteve depois de um
+ * teste sem resposta (reconfirmada false). Sem o campo, conta como conferida.
+ */
+function rotaDoBridge(rota, reconfirmadaFora) {
+  if (!rotaValida(rota)) return null;
+  const marca = typeof rota.reconfirmada === 'boolean' ? rota.reconfirmada
+    : typeof reconfirmadaFora === 'boolean' ? reconfirmadaFora : true;
+  return { ...rota, reconfirmada: marca };
+}
+
+function rotaMantida() {
+  return !!mesa.rota && mesa.rota.reconfirmada === false;
+}
+
+function testeEmAndamento() {
+  return mesa.fase === 'pedido' || mesa.fase === 'testando';
+}
+
+elBtnTestarMesa.addEventListener('click', () => {
+  if (!conectado || testeEmAndamento()) return;
+  mesa.faseAntes = mesa.fase;
+  mesa.fase = 'pedido';
+  mesa.testados = 0;
+  mesa.recusa = '';
+  vigiarTeste(ESPERA_RESPOSTA_TESTE);
+  enviar({ type: 'mesa:testar' });
+  desenharTesteDaMesa();
+});
+
+/**
+ * O bridge respondeu ao pedido com controle:erro: nao comecou teste nenhum.
+ * Volta ao que valia antes, sem esperar a vigia e sem o aviso de programa
+ * desatualizado; quem esperava o teste para puxar os canais para aqui.
+ */
+function recusarTeste(texto) {
+  clearTimeout(mesa.vigia);
+  mesa.vigia = null;
+  mesa.fase = mesa.faseAntes;
+  mesa.recusa = (typeof texto === 'string' && texto.trim()) ||
+    'O programa não pôde testar a mesa agora. Tente de novo daqui a pouco.';
+  desenharTesteDaMesa();
+  if (gerar.ativo && gerar.aguardandoTeste) {
+    // As marcas ficam: tentar de novo e um toque.
+    terminarGerar('', mesa.recusa);
+  }
+}
+
+function vigiarTeste(ms) {
+  clearTimeout(mesa.vigia);
+  mesa.vigia = setTimeout(() => {
+    if (!testeEmAndamento()) return;
+    mesa.motivo = mesa.fase === 'pedido'
+      ? 'O programa da mesa não respondeu ao pedido de teste. Ele pode estar desatualizado: ' +
+        'copie o diagnóstico abaixo e peça ajuda.'
+      : 'O teste parou de dar notícia. Toque em Testar a mesa para tentar de novo.';
+    mesa.fase = 'parou';
+    mesa.conferir = [];
+    desenharTesteDaMesa();
+    if (gerar.ativo && gerar.aguardandoTeste) {
+      terminarGerar('', 'O teste da mesa não terminou, então nenhum canal foi conferido. Tente de novo.');
+    }
+  }, ms);
+}
+
+/** Mensagem 'mesa:teste' do bridge (para todos os celulares). */
+function receberTesteDaMesa(msg) {
+  const fase = msg.fase;
+  if (fase !== 'testando' && fase !== 'ok' && fase !== 'falhou') return;
+  const jaTestava = testeEmAndamento();
+
+  mesa.fase = fase;
+  mesa.recusa = '';
+  mesa.testados = Number.isFinite(Number(msg.testados)) ? Math.max(0, Math.floor(Number(msg.testados))) : 0;
+  mesa.motivo = typeof msg.motivo === 'string' ? msg.motivo.trim() : '';
+  mesa.conferir = Array.isArray(msg.conferir)
+    ? msg.conferir.filter((t) => typeof t === 'string' && t.trim()).map((t) => t.trim())
+    : [];
+  if (fase === 'ok') {
+    const nova = rotaDoBridge(msg.rota, msg.reconfirmada);
+    if (nova) mesa.rota = { ...nova, em: nova.em || new Date().toISOString() };
+  } else if (fase === 'falhou') {
+    // A falha mantem a rota anterior (reconfirmada false), se havia uma.
+    const mantida = rotaDoBridge(msg.rota, msg.reconfirmada === undefined ? false : msg.reconfirmada);
+    const mesmaDeAntes = mantida && mesa.rota && mesa.rota.saida === mantida.saida &&
+      mesa.rota.canalMidi === mantida.canalMidi;
+    mesa.rota = mantida ? { ...mantida, em: mantida.em || (mesmaDeAntes ? mesa.rota.em : null) } : null;
+  }
+
+  clearTimeout(mesa.vigia);
+  if (fase === 'testando') vigiarTeste(ESPERA_MAX_TESTE);
+
+  desenharTesteDaMesa();
+  atualizarRodape();
+
+  // No palco a folha de ajustes costuma estar fechada: o rodape conta.
+  if (fase === 'testando') {
+    if (!jaTestava) avisarNoRodape('testando o caminho até a mesa', ESPERA_MAX_TESTE);
+  } else if (fase === 'ok') {
+    avisarNoRodape('caminho até a mesa conferido' +
+      (mesa.rota ? ': canal MIDI ' + mesa.rota.canalMidi : ''), AVISO_TESTE_OK_MS);
+  } else if (rotaMantida()) {
+    // Sem alarme: o caminho de antes continua em uso.
+    avisarNoRodape('teste da mesa sem resposta; segue no canal MIDI ' + mesa.rota.canalMidi, AVISO_TESTE_FALHOU_MS);
+  } else {
+    avisarNoRodape('a mesa não respondeu ao teste: veja Ajustes, bloco Mesa', AVISO_TESTE_FALHOU_MS);
+  }
+
+  if (!gerar.ativo) return;
+  if (fase === 'testando') {
+    vigiarGerar(ESPERA_MAX_TESTE);
+  } else if (fase === 'ok') {
+    if (gerar.aguardandoTeste) mandarGerar();
+    else vigiarGerar();
+  } else {
+    // Os marcados continuam marcados: tentar de novo e um toque. Sem resposta
+    // no teste, a conferencia tambem ficaria sem resposta: nao vale tentar.
+    terminarGerar('', (rotaMantida()
+      ? 'A mesa não respondeu ao teste, então nenhum canal foi conferido. '
+      : 'O teste não achou o caminho até a mesa, então nenhum canal foi conferido. ') +
+      'Veja o que conferir no bloco Mesa, no alto desta tela, e tente de novo.');
+    gerar.paradoPeloTeste = true;
+  }
+  desenharGerar();
+}
+
+function desenharTesteDaMesa() {
+  const testando = testeEmAndamento();
+  const falhou = mesa.fase === 'falhou' || mesa.fase === 'parou';
+
+  elMesaTestando.hidden = !testando;
+  if (testando) {
+    elMesaTestados.textContent = (mesa.testados
+      ? mesa.testados + (mesa.testados === 1 ? ' caminho testado. ' : ' caminhos testados. ')
+      : 'Pode levar até uns 20 segundos. ') + 'Só pedidos de leitura: nada muda no som.';
+  }
+
+  desenharRotaDaMesa(testando, falhou);
+
+  elMesaRecusa.textContent = mesa.recusa;
+  elMesaRecusa.hidden = !mesa.recusa || testando;
+
+  elMesaFalhou.hidden = !falhou || testando;
+  if (falhou) {
+    // Com o caminho anterior mantido, a lista e o que olhar se o som nao
+    // mudar; sem caminho nenhum, e o que conferir para a mesa responder.
+    elMesaConferirTitulo.textContent = rotaMantida()
+      ? 'Se o celular não mexer no som, confira na mesa:'
+      : 'Confira na mesa:';
+    elMesaMotivo.textContent = mesa.motivo ||
+      (mesa.testados
+        ? 'A mesa não respondeu em nenhum dos ' + mesa.testados + ' caminhos testados.'
+        : 'A mesa não respondeu ao teste.');
+    elMesaConferir.textContent = '';
+    for (const texto of mesa.conferir) {
+      const item = document.createElement('li');
+      item.appendChild(destacarMenus(texto));
+      elMesaConferir.appendChild(item);
+    }
+    elMesaConferirTitulo.hidden = !mesa.conferir.length;
+    elMesaConferir.hidden = !mesa.conferir.length;
+  }
+
+  elBtnTestarMesa.disabled = testando || !conectado;
+  elBtnTestarMesa.textContent = testando ? 'Testando a mesa' : 'Testar a mesa';
+}
+
+/**
+ * Linha do caminho ate a mesa:
+ *  - conferido agora: em destaque, com a hora;
+ *  - anterior mantido (o ultimo teste nao reconfirmou): calmo, diz que segue;
+ *  - testando de novo: o caminho velho apagado, para nao parecer atual;
+ *  - nenhum: "ainda nao conferido" (some se o teste falhou: a falha e o resultado).
+ */
+function desenharRotaDaMesa(testando, falhou) {
+  const rota = mesa.rota;
+  elMesaRota.hidden = !rota && (testando || falhou);
+  if (!rota) {
+    elMesaRota.className = 'bloco__texto';
+    elMesaRota.textContent = 'Caminho até a mesa ainda não conferido.';
+    return;
+  }
+
+  // Espacos que nao quebram: "canal MIDI 2 · às 19:02" desce inteiro.
+  const fixo = (texto) => texto.replace(/ /g, '\u00a0');
+  const quando = quandoNoDiagnostico(rota.em);
+  const caminho = rota.saida + ', ' + fixo('canal MIDI ' + rota.canalMidi);
+
+  if (testando) {
+    elMesaRota.className = 'bloco__texto';
+    elMesaRota.textContent = 'Testando de novo… Último caminho: ' + caminho +
+      (quando && rota.reconfirmada !== false ? fixo(' · ' + quando) : '') + '.';
+  } else if (rota.reconfirmada === false) {
+    elMesaRota.className = 'bloco__texto';
+    elMesaRota.textContent = 'Caminho anterior mantido: ' + caminho +
+      ' · não reconfirmado agora. O programa testa de novo sozinho.';
+  } else {
+    elMesaRota.className = 'bloco__estado';
+    elMesaRota.textContent = 'Caminho conferido: ' + caminho + (quando ? fixo(' · ' + quando) : '');
+  }
+}
+
+/* Nomes de menu e de tecla da mesa, como aparecem no visor: palavras em
+   maiusculas (MIDI SETUP, DIO/SETUP, PARAMETER CHANGE), Rx e Tx, e o que vier
+   entre aspas. O texto vem do bridge; aqui so ganha destaque, sem HTML.    */
+const PALAVRA_MENU = '(?:[A-Z][A-Z0-9]+|Rx|Tx)(?:[/-][A-Z0-9]+)*\\b';
+const TRECHO_MENU = new RegExp(
+  '"([^"\\n]+)"|“([^”\\n]+)”|\\b(' + PALAVRA_MENU +
+  '(?:(?:\\s*[>›]\\s*|\\s+)(?:' + PALAVRA_MENU + '|\\d{1,2}\\b))*)', 'g');
+
+// Siglas em maiusculas que nao sao nome de menu da mesa.
+const NAO_E_MENU = new Set(['PC']);
+
+function destacarMenus(texto) {
+  const pedacos = document.createDocumentFragment();
+  let desde = 0;
+  for (const achado of texto.matchAll(TRECHO_MENU)) {
+    const menu = achado[1] || achado[2] || achado[3];
+    if (NAO_E_MENU.has(menu)) continue;
+    const inicio = achado.index + achado[0].indexOf(menu);
+    pedacos.append(texto.slice(desde, inicio));
+    const forte = document.createElement('strong');
+    forte.textContent = menu;
+    pedacos.append(forte);
+    desde = inicio + menu.length;
+  }
+  pedacos.append(texto.slice(desde));
+  return pedacos;
+}
+
 // Fica no celular para ninguem precisar editar o config.json no PC da mesa.
 const elDevolverMix = document.getElementById('devolverMix');
 
@@ -872,13 +1227,35 @@ elBtnAjustes.addEventListener('click', () => {
     elPainel.showModal();
     return;
   }
+  abrirAjustes();
+});
+
+function abrirAjustes() {
   desenharListaAjustes();
   desenharEstadoDaMesa();
+  desenharTesteDaMesa();
   desenharGerar();
   desenharCenas();
   enviar({ type: 'midi:portas' });
-  elAjustes.showModal();
-});
+  if (!elAjustes.open) elAjustes.showModal();
+}
+
+/**
+ * "Puxar todos" vindo de fora da folha (fim do assistente): abre os ajustes
+ * no bloco de criar canais e ja comeca. Sem mesa, so marca e mostra o motivo.
+ */
+function puxarTodosDeFora() {
+  if (!conectado) return;
+  abrirAjustes();
+  if (gerar.ativo) {
+    elBlocoGerar.scrollIntoView({ block: 'start' });
+    return;
+  }
+  marcarTodosLivres();
+  desenharGerar();
+  elBlocoGerar.scrollIntoView({ block: 'start' });
+  iniciarGerar();
+}
 
 /* ---- cena da mesa ------------------------------------------------------
    Cada tecnico tem a sua cena, e a cena tambem muda os fones. A mesa so conta
@@ -1198,6 +1575,67 @@ function quandoNoDiagnostico(em) {
 
 /* ---- diagnostico para colar numa conversa ----------------------------- */
 
+const SEM_INFORMACAO = ['o programa não informa (versão antiga do bridge)'];
+
+/** Linha "rota:", a partir de /api/status.rota. */
+function descreverRotaNoDiagnostico(rota) {
+  if (rota === undefined) return SEM_INFORMACAO[0];
+  if (!rota) return 'não conferida';
+  const quando = quandoNoDiagnostico(rota.em);
+  return rota.saida + ', canal MIDI ' + rota.canalMidi + (quando ? ' (conferida ' + quando + ')' : '') +
+    (rota.reconfirmada === false ? ', mantida: o último teste não reconfirmou' : '');
+}
+
+/**
+ * "19:02:11.284 saiu para Yamaha 01V96-1: F0 43 30 3E ... F7", uma por linha.
+ * Contrato: { em, dir, porta, hex }. Aceita tambem { hora, direcao, vezes },
+ * o formato que o bridge usava enquanto o contrato era fechado.
+ */
+function linhasMidiNoDiagnostico(lista) {
+  if (lista === undefined) return SEM_INFORMACAO;
+  if (!Array.isArray(lista) || !lista.length) return ['nenhuma'];
+  return lista.map((m) => {
+    const dir = m.dir || m.direcao;
+    const sentido = dir === 'entrada' ? 'chegou de ' : dir === 'saida' ? 'saiu para ' : (dir || '?') + ' ';
+    const hora = m.em !== undefined ? horaComSegundos(m.em) : String(m.hora || '?');
+    const vezes = Number(m.vezes) > 1 ? ' (' + m.vezes + ' vezes)' : '';
+    return hora + ' ' + sentido + (m.porta || '?') + ': ' + formatarHex(m.hex) + vezes;
+  });
+}
+
+/**
+ * "Bumbo (bumbo): F0 43 10 ... F7 | valor no byte 9, 3 byte(s) | faixa 0 a 1023"
+ * Contrato: o hex vem em `hex`; aceita tambem `template`.
+ */
+function linhasControlesNoDiagnostico(lista) {
+  if (lista === undefined) return SEM_INFORMACAO;
+  if (!Array.isArray(lista) || !lista.length) return ['nenhum'];
+  return lista.map((c) =>
+    (c.rotulo || '?') + ' (' + c.id + '): ' + (formatarHex(c.hex !== undefined ? c.hex : c.template) || 'sem template') +
+    ' | valor no byte ' + c.offset + ', ' + c.length + ' byte(s)' +
+    ' | faixa ' + c.rawMin + ' a ' + c.rawMax);
+}
+
+/** "F0 43 30 ..." venha com ou sem espacos. Fora disso, devolve como veio. */
+function formatarHex(hex) {
+  if (typeof hex !== 'string') return hexDoBruto(hex);
+  const texto = hex.trim();
+  if (/^[0-9a-f]+$/i.test(texto) && texto.length % 2 === 0) {
+    return texto.match(/../g).join(' ').toUpperCase();
+  }
+  return texto.toUpperCase();
+}
+
+/** "19:02:11.284", com a data na frente quando nao foi hoje. */
+function horaComSegundos(em) {
+  const data = new Date(em);
+  if (em === null || em === undefined || Number.isNaN(data.getTime())) return String(em);
+  const hora = data.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) +
+    '.' + String(data.getMilliseconds()).padStart(3, '0');
+  if (data.toDateString() === new Date().toDateString()) return hora;
+  return data.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }) + ' ' + hora;
+}
+
 const elBtnDiagnostico = document.getElementById('btnDiagnostico');
 
 elBtnDiagnostico.addEventListener('click', async () => {
@@ -1214,6 +1652,7 @@ elBtnDiagnostico.addEventListener('click', async () => {
       'máquina: ' + dados.maquina.sistema + ', node ' + dados.maquina.node + ', ligado há ' + dados.maquina.ligadoHa,
       'mesa: ' + (dados.midi.simulado ? 'NAO ENCONTRADA' : dados.midi.saida),
       'motivo: ' + (dados.midi.motivo || 'sem erro'),
+      'rota: ' + descreverRotaNoDiagnostico(dados.rota),
       'portas MIDI vistas: ' + ((dados.midi.portasVistas || []).join(' | ') || 'nenhuma'),
       'cena: ' + descreverCenaNoDiagnostico(dados.cena),
       'controles: ' + dados.controles + ', sem calibrar: ' + (dados.naoCalibrados.join(', ') || 'nenhum'),
@@ -1222,6 +1661,12 @@ elBtnDiagnostico.addEventListener('click', async () => {
         ((dados.versao && dados.versao.instaladaEm) ? ' (instalada em ' + dados.versao.instaladaEm.slice(0, 10) + ')' : '') +
         ', atualização: ' + ((dados.versao && dados.versao.ultimoResultado) || 'sem registro'),
       'celular: ' + navigator.userAgent,
+      '',
+      'últimas mensagens MIDI:',
+      ...linhasMidiNoDiagnostico(dados.ultimosMidi),
+      '',
+      'controles em hex:',
+      ...linhasControlesNoDiagnostico(dados.controlesHex),
       '',
       'últimos avisos do programa:',
       ...(dados.avisos && dados.avisos.length ? dados.avisos : ['nenhum'])
@@ -1275,7 +1720,8 @@ const assistente = {
   ativo: false,
   controle: null,  // null quando e um controle novo
   etapa: 'nome',   // nome | min | max | salvando | fim
-  tipo: 'canal'
+  tipo: 'canal',
+  idSalvo: null    // id do controle que acabou de ser salvo (etapa fim)
 };
 
 const elEtapaNome = document.getElementById('etapaNome');
@@ -1291,6 +1737,9 @@ const elAssResumo = document.getElementById('assResumo');
 const elAssErro = document.getElementById('assErro');
 const elAssSeguir = document.getElementById('assSeguir');
 const elAssCancelar = document.getElementById('assCancelar');
+const elAssPuxar = document.getElementById('assPuxar');
+const elAssPuxarTexto = document.getElementById('assPuxarTexto');
+const elAssPuxarBotao = document.getElementById('assPuxarBotao');
 
 function abrirAssistente(controle) {
   if (!conectado) {
@@ -1302,6 +1751,8 @@ function abrirAssistente(controle) {
   assistente.controle = controle;
   assistente.etapa = 'nome';
   assistente.tipo = controle ? controle.type : 'canal';
+  assistente.idSalvo = null;
+  elAssPuxar.hidden = true;
 
   elAssTitulo.textContent = controle ? 'Recalibrar ' + controle.label : 'Novo controle';
   elAssNome.value = controle ? controle.label : '';
@@ -1404,6 +1855,31 @@ elAssSeguir.addEventListener('click', () => {
 
 elAssCancelar.addEventListener('click', () => fecharAssistente(true));
 
+/**
+ * Fim da calibracao de um canal no formato do manual: ele serve de molde, e
+ * da para puxar os outros dali mesmo. Oferta, nao obrigacao: Concluir basta.
+ */
+function desenharOfertaPuxar() {
+  const salvo = assistente.etapa === 'fim' && assistente.idSalvo
+    ? listaControles.find((c) => c.id === assistente.idSalvo)
+    : null;
+  const canal = salvo ? canalDaMesa(salvo) : null;
+  const livres = canal ? canaisLivres().length : 0;
+
+  elAssPuxar.hidden = !canal || !livres;
+  if (elAssPuxar.hidden) return;
+
+  elAssPuxarTexto.textContent =
+    'O canal ' + canal + ' ficou no formato do manual da mesa e serve de molde para ' +
+    (livres === 1 ? 'o outro canal que falta' : 'os outros ' + livres + ' canais') + '. ' +
+    'O programa confere cada um com a mesa antes de criar. Se preferir, conclua e faça isso depois nos ajustes.';
+}
+
+elAssPuxarBotao.addEventListener('click', () => {
+  fecharAssistente(false);
+  puxarTodosDeFora();
+});
+
 elAssistente.addEventListener('cancel', (ev) => {
   ev.preventDefault();
   fecharAssistente(true);
@@ -1447,11 +1923,13 @@ function receberDoAssistente(msg) {
 
     elAssResumo.textContent = '"' + msg.control.label + '" já responde no seu fone.';
     elAssResumo.dataset.detalhe = detalhe;
+    assistente.idSalvo = msg.control.id;
 
     if (msg.avisos && msg.avisos.length) {
       mostrarErroAssistente(msg.avisos.join(' '));
     }
     desenharEtapa();
+    desenharOfertaPuxar();
     return;
   }
 

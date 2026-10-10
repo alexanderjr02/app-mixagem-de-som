@@ -12,6 +12,9 @@
  *      com a mesa
  *   5. percebe quando a equipe chama uma cena na mesa, mostra qual entrou e
  *      rele da mesa os controles calibrados (so leitura)
+ *   6. testa por qual porta e com qual canal MIDI (o Rx CH da mesa) ela aceita
+ *      o que o bridge manda, so com pedidos de leitura, e passa a escrever
+ *      por essa rota
  *
  * Seguranca de audio: o bridge so envia SysEx de controles marcados como
  * "calibrado": true no config.json. Enquanto voce nao calibrar, mexer nos
@@ -34,7 +37,9 @@ try {
 }
 
 const configArquivo = require('./config');
-const { abrirSaida, abrirEntrada, listarPortas, midiDisponivel, mensagemErroMidi } = require('./midi-io');
+const {
+  abrirSaida, abrirEntrada, listarPortas, portasCandidatas, midiDisponivel, mensagemErroMidi
+} = require('./midi-io');
 const mesa = require('./yamaha01v96');
 
 const DIR_PUBLIC = path.join(configArquivo.RAIZ, 'public');
@@ -146,17 +151,121 @@ function gravarControles(transformar) {
 }
 
 // ---------------------------------------------------------------------------
+// Rota: por qual saida e com qual n (device number) a mesa aceita o que o
+// bridge manda. Quem descobre e o teste da mesa (veja "Teste da mesa").
+// ---------------------------------------------------------------------------
+
+/** Rota do config.json, conferida campo a campo; null se nao ha ou esta estragada. */
+function lerRota(r) {
+  if (!r || typeof r !== 'object') return null;
+  if (typeof r.saida !== 'string' || !r.saida.trim()) return null;
+  if (!Number.isInteger(r.dispositivo) || r.dispositivo < 0 || r.dispositivo > 15) return null;
+  return {
+    saida: r.saida.slice(0, 200),
+    entrada: typeof r.entrada === 'string' && r.entrada.trim() ? r.entrada.slice(0, 200) : null,
+    dispositivo: r.dispositivo,
+    em: typeof r.em === 'string' ? r.em.slice(0, 40) : null,
+    // false = o ultimo teste nao teve resposta: a rota continua valendo (e o
+    // melhor caminho conhecido), mas o bridge testa de novo sozinho.
+    reconfirmada: r.reconfirmada !== false
+  };
+}
+
+let rota = lerRota(cfg.midi.rota);
+
+/** A rota foi achada na saida que esta aberta agora? */
+function rotaValeParaSaida() {
+  return rota !== null && !saidaMidi.simulado && rota.saida === saidaMidi.nome;
+}
+
+/**
+ * n com que o bridge escreve: o da rota, so quando ela vale para a saida
+ * aberta. Em outra porta (trocada pelo app, ou o nome mudou), null: cada
+ * molde usa o proprio n ate o teste achar a rota dessa porta.
+ */
+function dispositivoDaRota() {
+  return rotaValeParaSaida() ? rota.dispositivo : null;
+}
+
+// ---------------------------------------------------------------------------
 // MIDI
 // ---------------------------------------------------------------------------
 
 /** Entrada da mesa com SysEx e Program Change (que avisa a troca de cena). */
-function abrirEntradaDaMesa() {
-  return abrirEntrada(cfg.midi.entrada, aoReceberDaMesa, { programChange: true });
+function abrirEntradaDaMesa(spec = cfg.midi.entrada) {
+  return abrirEntrada(spec, aoReceberDaMesa, { programChange: true });
+}
+
+/**
+ * Saida da mesa. A rota grava o nome exato da porta em midi.saida; se esse
+ * nome nao existe mais mas a mesa esta no cabo com outro nome (o Linux
+ * renumera as portas), volta para a procura automatica, e a mesa e testada
+ * de novo nessa porta.
+ */
+function abrirSaidaDaMesa() {
+  const saida = abrirSaida(cfg.midi.saida);
+  if (saida.simulado && rota && cfg.midi.saida === rota.saida) {
+    const automatica = abrirSaida(null);
+    if (!automatica.simulado) {
+      console.warn('[midi] a porta da rota ("' + rota.saida + '") nao apareceu; usando ' + automatica.nome);
+      return automatica;
+    }
+  }
+  return saida;
 }
 
 // As portas sao procuradas sozinhas quando o config.json nao diz qual usar.
-let saidaMidi = abrirSaida(cfg.midi.saida);
+let saidaMidi = abrirSaidaDaMesa();
 let entradaMidi = abrirEntradaDaMesa();
+// Segunda entrada, so quando o teste da mesa achou a resposta numa porta
+// diferente da entrada principal (onde chegam calibracao e cena). No maximo duas.
+let entradaResposta = null;
+abrirEntradaDaResposta();
+
+function fecharEntradaDaResposta() {
+  if (!entradaResposta) return;
+  try { entradaResposta.fechar(); } catch { /* ignora */ }
+  entradaResposta = null;
+}
+
+// Avisa uma vez so quando a entrada das respostas nao abre (procurarMesa
+// tenta de novo a cada volta e encheria o diagnostico).
+let avisouEntradaResposta = false;
+
+/** A rota diz que a resposta chega por outra entrada que nao a principal, e ela nao esta aberta? */
+function faltaEntradaDaResposta() {
+  return !!(rota && rota.entrada) && !entradaMidi.simulado && rota.entrada !== entradaMidi.nome &&
+    !(entradaResposta && entradaResposta.nome === rota.entrada);
+}
+
+/** Abre a entrada em que a mesa responde, se a rota diz que e outra que nao a principal. */
+function abrirEntradaDaResposta() {
+  const nome = rota && rota.entrada;
+  if (entradaResposta && entradaResposta.nome === nome) return;
+  fecharEntradaDaResposta();
+  if (!nome || entradaMidi.simulado || nome === entradaMidi.nome) return;
+  const entrada = abrirEntradaDaMesa(nome);
+  if (entrada.simulado) {
+    if (!avisouEntradaResposta) {
+      console.warn('[midi] nao abri a entrada das respostas ("' + nome + '"): ' + entrada.motivo);
+      avisouEntradaResposta = true;
+    }
+    return;
+  }
+  avisouEntradaResposta = false;
+  entradaResposta = entrada;
+  console.log('[midi] entrada das respostas: ' + entrada.nome);
+}
+
+/** Fecha e abre de novo as portas da mesa (saida, entrada e a das respostas). */
+function reabrirPortas() {
+  try { saidaMidi.fechar(); } catch { /* ignora */ }
+  try { entradaMidi.fechar(); } catch { /* ignora */ }
+  fecharEntradaDaResposta();
+  saidaMidi = abrirSaidaDaMesa();
+  entradaMidi = abrirEntradaDaMesa();
+  abrirEntradaDaResposta();
+}
 
 function contarMidi(inicial) {
   if (saidaMidi.simulado) {
@@ -171,6 +280,7 @@ function contarMidi(inicial) {
   } else {
     console.log('[midi] entrada: ' + entradaMidi.nome);
   }
+  if (entradaResposta) console.log('[midi] entrada das respostas: ' + entradaResposta.nome);
 }
 
 contarMidi(true);
@@ -180,29 +290,40 @@ contarMidi(true);
  * enquanto a mesa e desligada depois do culto. Em vez de exigir reiniciar o
  * programa, ele confere de dez em dez segundos: se a mesa sumiu, larga a porta
  * morta; se a mesa apareceu, conecta. E avisa os celulares nos dois casos.
+ * Mesa que conecta sem rota confirmada para a saida e testada (veja
+ * pedirDescoberta).
  */
 function procurarMesa() {
-  if (saidaMidi.sumiu() || entradaMidi.sumiu()) {
-    // Entrada e saida sao o mesmo cabo: se uma morreu, as duas sao reabertas.
+  const respostaSumiu = entradaResposta !== null && entradaResposta.sumiu();
+  if (saidaMidi.sumiu() || entradaMidi.sumiu() || respostaSumiu) {
+    // Entradas e saida sao o mesmo cabo: se uma morreu, todas sao reabertas.
     console.warn('[midi] a mesa sumiu (desligada ou cabo solto), procurando de novo');
     interromperGeracao('a mesa sumiu no meio');
     interromperReleitura('a mesa sumiu no meio');
-    try { saidaMidi.fechar(); } catch { /* ignora */ }
-    try { entradaMidi.fechar(); } catch { /* ignora */ }
-    saidaMidi = abrirSaida(cfg.midi.saida);
-    entradaMidi = abrirEntradaDaMesa();
+    interromperDescoberta('A mesa saiu do cabo no meio do teste. Nada foi gravado.');
+    reabrirPortas();
     contarMidi(false);
     transmitirStatus();
-    if (!saidaMidi.simulado) reaplicarMix();
+    if (!saidaMidi.simulado) {
+      reaplicarMix();
+      pedirDescoberta('conexao');
+    }
     return;
   }
 
-  if (!saidaMidi.simulado && !entradaMidi.simulado) return;
+  if (!saidaMidi.simulado && !entradaMidi.simulado) {
+    // Mesa no ar: a entrada das respostas pode nao ter aberto antes (porta
+    // presa ou ainda nao listada). Tenta de novo.
+    if (faltaEntradaDaResposta()) abrirEntradaDaResposta();
+    // Rota que ficou sem resposta no ultimo teste: tenta de novo, devagar.
+    tentarReconfirmarRota();
+    return;
+  }
 
   let mudou = false;
 
   if (saidaMidi.simulado) {
-    const nova = abrirSaida(cfg.midi.saida);
+    const nova = abrirSaidaDaMesa();
     if (!nova.simulado) {
       try { saidaMidi.fechar(); } catch { /* ignora */ }
       saidaMidi = nova;
@@ -221,10 +342,12 @@ function procurarMesa() {
 
   if (!mudou) return;
 
+  abrirEntradaDaResposta();
   console.log('[midi] mesa encontrada');
   contarMidi(false);
   transmitirStatus();
   reaplicarMix();
+  pedirDescoberta('conexao');
 }
 
 /** Com a mesa de volta, o mix que esta na tela vale mais que o da mesa. */
@@ -254,12 +377,16 @@ function agendarEnvio(id) {
 
 function despacharFila() {
   if (!pendentes.size) return;
+  // Testando a mesa: os valores ficam na fila e saem logo depois, ja com o
+  // canal MIDI que a mesa aceita. Durante o teste nao sai Parameter change.
+  if (descoberta) return;
+  const dispositivo = dispositivoDaRota();
   for (const [id, valor] of pendentes) {
     const controle = porId.get(id);
     if (!controle) continue;
     if (!mesa.estaCalibrado(controle)) continue; // protecao: nunca chutar bytes
     try {
-      saidaMidi.enviar(mesa.montarFrame(controle, valor));
+      enviarMidi(saidaMidi, mesa.montarFrame(controle, valor, dispositivo));
       ultimoEnvio.set(id, Date.now());
     } catch (erro) {
       console.error('[midi] falha ao montar quadro de "' + id + '": ' + erro.message);
@@ -270,18 +397,66 @@ function despacharFila() {
 
 setInterval(despacharFila, Math.max(5, cfg.midi.intervaloEnvioMs || 25)).unref();
 
+// ---------------------------------------------------------------------------
+// Caixa preta MIDI: as ultimas mensagens que entraram e sairam, com a porta,
+// para o "Copiar diagnostico". So SysEx e Program Change. Fluxo repetido do
+// mesmo endereco na mesma porta (fader arrastado, meter) vira uma linha so,
+// com a contagem em "vezes", em vez de empurrar o resto para fora.
+// ---------------------------------------------------------------------------
+
+const MAX_MIDI = 40;
+const JANELA_MIDI_REPETIDO_MS = 1000;
+const MAX_BYTES_HEX = 48;
+const ultimosMidi = [];
+
+/** direcao: 'entrada' (mesa -> bridge) ou 'saida' (bridge -> mesa). */
+function registrarMidi(direcao, porta, bytes) {
+  if (!Array.isArray(bytes) || bytes.length < 2) return;
+  const ehSysex = bytes[0] === mesa.INICIO_SYSEX;
+  const ehPrograma = bytes.length === 2 && bytes[0] >= 0xc0 && bytes[0] <= 0xcf;
+  if (!ehSysex && !ehPrograma) return;
+
+  const agora = Date.now();
+  // Endereco no formato do manual: tudo ate o byte do canal (F0 43 1n 3E 0D tt ee pp cc).
+  const endereco = ehSysex && bytes.length > 10 ? bytes.slice(0, 9) : bytes;
+  const chave = direcao + '|' + porta + '|' + mesa.paraHex(endereco);
+  const hex = mesa.paraHex(bytes.slice(0, MAX_BYTES_HEX)) + (bytes.length > MAX_BYTES_HEX ? ' ...' : '');
+
+  const repetido = ultimosMidi.find((m) => m.chave === chave && agora - m.quando < JANELA_MIDI_REPETIDO_MS);
+  if (repetido) {
+    repetido.quando = agora;
+    repetido.hex = hex;
+    repetido.vezes++;
+    return;
+  }
+  ultimosMidi.push({ chave, quando: agora, dir: direcao, porta: porta || '?', hex, vezes: 1 });
+  if (ultimosMidi.length > MAX_MIDI) ultimosMidi.shift();
+}
+
+/** Todo envio para a mesa passa por aqui, para ficar na caixa preta. */
+function enviarMidi(saida, bytes) {
+  registrarMidi('saida', saida.nome, bytes);
+  saida.enviar(bytes);
+}
+
 /**
  * Chegou mensagem da mesa (SysEx ou Program Change).
  *
  * Troca de cena vem antes de tudo e para ali: nunca vira quadro de
  * calibracao nem valor de controle. Depois, resposta a pedido de leitura
- * (criacao de canais ou releitura da cena) e so de quem pediu. Se alguem
- * estiver calibrando pelo celular, o quadro vai para essa conversa. Fora
- * isso, se ele bater com o molde de algum controle ja calibrado, o estado e
- * atualizado e os celulares avisados: mexeu no send direto na mesa, o app
- * acompanha em vez de mostrar valor errado.
+ * (teste da mesa, criacao de canais ou releitura da cena) e so de quem pediu.
+ * Se alguem estiver calibrando pelo celular, o quadro vai para essa conversa.
+ * Fora isso, se ele bater com o molde de algum controle ja calibrado, o
+ * estado e atualizado e os celulares avisados: mexeu no send direto na mesa,
+ * o app acompanha em vez de mostrar valor errado.
+ *
+ * "porta" e o nome da entrada por onde chegou (o bridge pode escutar duas, e
+ * todas as candidatas durante o teste da mesa).
  */
-function aoReceberDaMesa(bytes) {
+function aoReceberDaMesa(bytes, porta) {
+  const deOnde = porta || entradaMidi.nome;
+  registrarMidi('entrada', deOnde, bytes);
+
   const cena = cenaDaMensagem(bytes);
   if (cena) {
     tratarCena(cena);
@@ -300,13 +475,15 @@ function aoReceberDaMesa(bytes) {
     return;
   }
 
-  // Resposta ao pedido de leitura (criacao de canais ou releitura): e so dela.
-  for (const fluxo of [geracao, releitura]) {
+  // Resposta ao pedido de leitura (teste, criacao de canais ou releitura): e
+  // so dela. O n do device nao conta: a mesa pode responder com o Rx CH ou
+  // com o Tx CH (o manual diz os dois).
+  for (const fluxo of [descoberta, geracao, releitura]) {
     const pendente = fluxo && fluxo.pendente;
     if (!pendente) continue;
     const raw = mesa.lerValorDoFrame(pendente.candidato, bytes);
     if (raw !== null) {
-      pendente.responder(raw);
+      pendente.responder(raw, deOnde);
       return;
     }
   }
@@ -399,6 +576,15 @@ function iniciarSessao(cliente, msg) {
     });
     return;
   }
+  // Nem enquanto testa a mesa: a resposta do teste cairia na calibracao.
+  if (descoberta) {
+    enviarPara(cliente, {
+      type: 'learn:erro',
+      message: 'Estou testando a mesa agora (pode levar ate uns 20 segundos). Espere terminar para calibrar.',
+      etapa: 'nome'
+    });
+    return;
+  }
   sessoes.set(cliente, {
     idAtual: typeof msg.control === 'string' ? msg.control : null,
     rotulo: String(msg.label || '').trim().slice(0, 40),
@@ -412,9 +598,9 @@ function iniciarSessao(cliente, msg) {
   enviarPara(cliente, { type: 'learn:pronto-para', step: 'min' });
 }
 
-/** Fecha a calibracao desse celular; se uma releitura de cena esperava, ela roda agora. */
+/** Fecha a calibracao desse celular; se um teste ou uma releitura esperava, roda agora. */
 function encerrarSessao(cliente) {
-  if (sessoes.delete(cliente)) tentarReleituraPendente();
+  if (sessoes.delete(cliente)) tentarPendentes();
 }
 
 function capturarNaSessao(cliente, msg) {
@@ -502,6 +688,11 @@ function salvarSessao(cliente) {
   });
 
   anunciarControles();
+
+  // Sem rota confirmada nesta saida (nenhuma ainda, de outra porta, ou sem
+  // resposta no ultimo teste): testa a mesa ja, para o fader obedecer (a mesa
+  // pode ter Rx CH diferente do Tx CH). Com rota confirmada, nao testa.
+  pedirDescoberta('calibracao');
 }
 
 function anunciarControles() {
@@ -519,7 +710,12 @@ function statusAtual() {
       saida: saidaMidi.nome,
       entrada: entradaMidi.nome,
       motivo: saidaMidi.motivo || null
-    }
+    },
+    // A ultima rota que a mesa confirmou (vale para a saida em rota.saida).
+    // reconfirmada false: o ultimo teste nao teve resposta, mas ela continua.
+    rota: rota
+      ? { saida: rota.saida, canalMidi: rota.dispositivo + 1, em: rota.em, reconfirmada: rota.reconfirmada }
+      : null
   };
 }
 
@@ -554,7 +750,8 @@ function mesaSaiuDoAr(g) {
     saidaMidi.simulado ||
     entradaMidi.simulado ||
     saidaMidi.sumiu() ||
-    entradaMidi.sumiu()
+    entradaMidi.sumiu() ||
+    (entradaResposta !== null && entradaResposta.sumiu())
   );
 }
 
@@ -575,23 +772,26 @@ function enderecoJaExiste(lista, candidato) {
       // mesmo cabecalho (F0 43 1n 3E 0D tt ee pp) e mesmo canal e o mesmo parametro.
       (canal !== null &&
         mesa.canalDoControle(c) === canal &&
-        c.template.slice(0, 8).every((b, i) => b === candidato.template[i]))
+        mesa.mesmoCabecalho(c.template, candidato.template))
   );
 }
 
 /**
  * Espera a mesa responder o pedido. Registrada antes do envio: a resposta pode
- * ser rapida. Serve a criacao de canais e a releitura de cena (g e o fluxo).
- * Sem resposta a tempo (ou interrompido), o pedido ja saiu: se a mesa
- * responder depois, a resposta fica de quarentena (veja lembrarAtrasada).
+ * ser rapida. Serve o teste da mesa, a criacao de canais e a releitura de
+ * cena (g e o fluxo); a entrada por onde a resposta chegou fica em
+ * g.portaDaResposta. Sem resposta a tempo (ou interrompido), o pedido ja
+ * saiu: se a mesa responder depois, a resposta fica de quarentena (veja
+ * lembrarAtrasada).
  */
-function esperarResposta(g, candidato) {
+function esperarResposta(g, candidato, ms = esperaResposta()) {
   return new Promise((ok) => {
-    const timer = setTimeout(() => terminar(null), esperaResposta());
-    function terminar(raw) {
+    const timer = setTimeout(() => terminar(null), ms);
+    function terminar(raw, porta) {
       clearTimeout(timer);
       if (g.pendente === pendente) g.pendente = null;
       if (raw === null) lembrarAtrasada(candidato);
+      else g.portaDaResposta = porta || null;
       ok(raw);
     }
     const pendente = { candidato, responder: terminar };
@@ -603,9 +803,17 @@ function recusarGeracao(cliente, message) {
   enviarPara(cliente, { type: 'gerar:erro', message });
 }
 
-function iniciarGeracao(cliente, msg) {
+/**
+ * jaTestou: a geracao que disparou o teste da mesa volta aqui depois que ele
+ * achou a rota, e nao testa de novo.
+ */
+function iniciarGeracao(cliente, msg, jaTestou = false) {
   if (geracao) {
     return recusarGeracao(cliente, 'Ja estou criando canais agora. Espere terminar e tente de novo.');
+  }
+  // O teste da mesa usa a mesma entrada para as respostas: uma coisa por vez.
+  if (descoberta) {
+    return recusarGeracao(cliente, 'Estou testando a mesa agora (pode levar ate uns 20 segundos). Espere terminar e tente de novo.');
   }
   // Releitura da cena usa a mesma entrada para as respostas: uma coisa por vez.
   if (releitura) {
@@ -645,6 +853,18 @@ function iniciarGeracao(cliente, msg) {
   }
   const canais = [...new Set(pedidos)].sort((a, b) => a - b);
   if (!canais.length) return recusarGeracao(cliente, 'Marque pelo menos um canal.');
+
+  // Sem rota confirmada nesta saida, a mesa pode ignorar todos os pedidos
+  // (Rx CH diferente do Tx CH, ou outra porta): testa antes e so cria depois
+  // de achar. Durante o teste, outro pedido de criar canais e recusado.
+  if (!jaTestou && !rotaVerificada()) {
+    console.log('[gerar] sem rota confirmada em "' + saidaMidi.nome + '": testo a mesa antes de criar');
+    iniciarDescoberta('gerar', (achou, motivo) => {
+      if (achou) iniciarGeracao(cliente, msg, true);
+      else recusarGeracao(cliente, 'A mesa nao respondeu ao teste, entao nao criei nenhum canal. ' + motivo);
+    });
+    return;
+  }
 
   const base = { ...original, template: original.template.slice() };
   const jaExistiam = [];
@@ -689,8 +909,8 @@ function iniciarGeracao(cliente, msg) {
     }
   }).finally(() => {
     if (geracao === g) geracao = null;
-    // Trocaram de cena enquanto os canais eram criados: rele agora.
-    tentarReleituraPendente();
+    // Trocaram de cena (ou a mesa reconectou) enquanto os canais eram criados: roda agora.
+    tentarPendentes();
   });
 }
 
@@ -705,7 +925,7 @@ async function rodarGeracao(g) {
     const candidato = mesa.controleParaCanal(g.base, canal);
     const resposta = esperarResposta(g, candidato);
     // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
-    g.saida.enviar(mesa.montarPedido(g.base, canal));
+    enviarMidi(g.saida, mesa.montarPedido(g.base, canal, dispositivoDaRota()));
     const raw = await resposta;
 
     if (g.interrompido) break;
@@ -781,7 +1001,7 @@ function concluirGeracao(g) {
   console.log('[gerar] ' + criados.length + ' criado(s), ' + g.semResposta.length + ' sem resposta, ' +
     jaExistiam.length + ' ja existiam' + (g.interrompido ? ', interrompido' : ''));
   if (!g.confirmados.length && g.semResposta.length) {
-    console.warn('[gerar] a mesa nao respondeu nenhum pedido: confira Parameter Change RX ligado e Rx CH igual ao Device ID');
+    console.warn('[gerar] a mesa nao respondeu nenhum pedido: toque em "Testar a mesa" no app e confira PARAMETER CHANGE Rx ON em MIDI | Setup');
   }
 
   enviarPara(g.cliente, {
@@ -966,10 +1186,10 @@ function interromperReleitura(motivo) {
   if (releitura.pendente) releitura.pendente.responder(null);
 }
 
-/** Calibracao ou criacao de canais acabou: se alguma cena esperava releitura, vai agora. */
+/** Calibracao, criacao de canais ou teste acabou: se alguma cena esperava releitura, vai agora. */
 function tentarReleituraPendente() {
   if (releituraPendente === null || timerReleitura) return;
-  if (geracao || sessoes.size || releitura) return;
+  if (geracao || sessoes.size || releitura || descoberta) return;
   comecarReleitura(releituraPendente);
 }
 
@@ -979,18 +1199,21 @@ function comecarReleitura(numero) {
     console.log('[cena] a mesa saiu do cabo antes de reler a cena ' + numero);
     return;
   }
-  // Releitura, criacao de canais e calibracao nunca rodam juntas: as tres leem
-  // a mesma entrada, e uma resposta atrasada cairia no fluxo errado.
-  if (geracao || sessoes.size || releitura) {
+  // Releitura, teste da mesa, criacao de canais e calibracao nunca rodam
+  // juntos: todos leem as mesmas entradas, e uma resposta atrasada cairia no
+  // fluxo errado.
+  if (geracao || sessoes.size || releitura || descoberta) {
     releituraPendente = numero;
-    const quem = geracao ? 'a criacao de canais' : sessoes.size ? 'a calibracao' : 'a releitura anterior';
+    const quem = descoberta ? 'o teste da mesa' : geracao ? 'a criacao de canais'
+      : sessoes.size ? 'a calibracao' : 'a releitura anterior';
     console.log('[cena] a releitura da cena ' + numero + ' espera ' + quem + ' terminar');
     return;
   }
 
   const fila = [];
+  const dispositivo = dispositivoDaRota();
   for (const c of controles) {
-    const pedido = mesa.montarPedidoDoControle(c);
+    const pedido = mesa.montarPedidoDoControle(c, dispositivo);
     if (pedido) fila.push({ id: c.id, controle: { ...c, template: c.template.slice() }, pedido });
   }
   if (!fila.length) {
@@ -1013,7 +1236,7 @@ function comecarReleitura(numero) {
     .catch((erro) => console.error('[cena] erro na releitura: ' + erro.message))
     .finally(() => {
       if (releitura === r) releitura = null;
-      tentarReleituraPendente();
+      tentarPendentes();
     });
 }
 
@@ -1033,7 +1256,7 @@ async function rodarReleitura(r) {
     const pedidoEm = Date.now();
     const resposta = esperarResposta(r, item.controle);
     // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
-    r.saida.enviar(item.pedido);
+    enviarMidi(r.saida, item.pedido);
     const raw = await resposta;
 
     if (raw === null) {
@@ -1113,6 +1336,401 @@ function nomearCena(cliente, msg) {
 
   console.log('[cena] nome da cena ' + numero + (nome ? ' salvo' : ' apagado'));
   transmitir(mensagemCena());
+}
+
+// ---------------------------------------------------------------------------
+// Teste da mesa (descoberta da rota)
+// ---------------------------------------------------------------------------
+
+/**
+ * A 01V96 so aceita Parameter change e Parameter request quando o n (device
+ * number) bate com o Rx CH dela e quando chegam pela porta do GENERAL Rx PORT
+ * (01V96 V2, p.215-218 e p.313). O molde calibrado traz o Tx CH, que e outro
+ * ajuste e pode ser diferente. Entao o bridge testa: manda um Parameter
+ * request (pedido de leitura, nunca muda o som) do endereco de um controle
+ * calibrado por cada saida candidata, com cada n, um por vez, e espera a mesa
+ * responder em qualquer entrada candidata. O par que responde, responde de
+ * novo na confirmacao e fica calado com outro n (contra-prova) vira a rota.
+ * Daqui nunca sai Parameter change.
+ *
+ * Teste sem resposta nao apaga uma rota ja confirmada: ela continua valendo
+ * (e o melhor caminho conhecido), marcada como nao reconfirmada, e o bridge
+ * testa de novo sozinho (veja tentarReconfirmarRota).
+ *
+ * Exclusivo com calibracao, criacao de canais e releitura de cena (todos leem
+ * as mesmas entradas), com a mesma quarentena de resposta atrasada.
+ */
+let descoberta = null;
+let descobertaPendente = null; // origem do teste que espera a vez
+let fimDoUltimoTeste = 0; // para a nova tentativa sozinha nao passar de 1 por minuto
+
+// Texto puro (sem HTML): o app destaca as palavras em maiusculas, Rx/Tx e o
+// que esta entre aspas.
+const CONFERIR_NA_MESA = [
+  'MIDI | SETUP: PARAMETER CHANGE com Rx ON.',
+  'MIDI | SETUP, linha CHANNEL: anote os canais Tx e Rx (o app testa o Rx sozinho, de 1 a 16).',
+  'DIO/SETUP | MIDI/HOST: GENERAL Rx PORT e Tx PORT em USB (a mesma USB do cabo).',
+  'Feche o "AirFader" (ou o "Studio Manager") neste PC: aberto, ele pode prender a porta da mesa.'
+];
+
+function esperaTeste() {
+  const ms = Number(cfg.midi.esperaTesteMs);
+  return Number.isFinite(ms) && ms > 0 ? Math.min(2000, Math.max(20, ms)) : 150;
+}
+
+/** Molde do teste: o primeiro controle que da para pedir no formato do manual. */
+function acharMolde() {
+  const c = controles.find((x) => mesa.montarPedidoDoControle(x) !== null);
+  return c ? { ...c, template: c.template.slice() } : null;
+}
+
+/** A rota vale para a saida aberta e respondeu no ultimo teste? Senao, falta testar. */
+function rotaVerificada() {
+  return rotaValeParaSaida() && rota.reconfirmada;
+}
+
+/** Intervalo minimo entre as novas tentativas sozinhas (padrao 1 minuto). */
+function intervaloReconfirmar() {
+  const ms = Number(cfg.midi.retestarRotaMs);
+  return Number.isFinite(ms) && ms > 0 ? Math.max(1000, ms) : 60000;
+}
+
+/**
+ * Rota que ficou sem resposta no ultimo teste: com a mesa no ar e nada mais
+ * rodando, testa de novo, no maximo uma vez por intervalo. So leitura.
+ * Chamada a cada volta do procurarMesa.
+ */
+function tentarReconfirmarRota() {
+  if (!rota || rota.reconfirmada || !rotaValeParaSaida()) return;
+  if (descoberta || geracao || releitura || sessoes.size || timerReleitura) return;
+  if (Date.now() - fimDoUltimoTeste < intervaloReconfirmar()) return;
+  pedirDescoberta('reconfirmar');
+}
+
+/** A rota como vai para o app: sem o n cru, com o canal MIDI. */
+function rotaParaApp(r) {
+  return r ? { saida: r.saida, entrada: r.entrada, canalMidi: r.dispositivo + 1, reconfirmada: r.reconfirmada } : null;
+}
+
+/** Ordem dos n: o da rota (se houver), o do molde, e depois 0 a 15. */
+function ordemDosDispositivos(molde) {
+  const ordem = [];
+  if (rota) ordem.push(rota.dispositivo);
+  ordem.push(mesa.dispositivoDoControle(molde));
+  for (let n = 0; n <= 15; n++) ordem.push(n);
+  return [...new Set(ordem.filter(Number.isInteger))];
+}
+
+/** Saida atual primeiro, depois as outras com cara de mesa. */
+function ordemDasSaidas(nomes) {
+  const ordem = saidaMidi.simulado ? [] : [saidaMidi.nome];
+  for (const nome of portasCandidatas(nomes)) if (!ordem.includes(nome)) ordem.push(nome);
+  return ordem;
+}
+
+function mensagemTeste(fase, d, extra = {}) {
+  return {
+    type: 'mesa:teste',
+    fase,
+    rota: null,
+    testados: d ? d.testados : 0,
+    motivo: null,
+    conferir: [],
+    ...extra
+  };
+}
+
+/**
+ * Teste automatico (mesa conectou, primeira calibracao): so quando falta rota
+ * confirmada para a saida atual e ja existe molde. Se outra coisa exclusiva
+ * estiver rodando, espera a vez (tentarPendentes).
+ */
+function pedirDescoberta(origem) {
+  if (semMesa() || rotaVerificada() || !acharMolde()) return;
+  if (descoberta || geracao || releitura || sessoes.size) {
+    descobertaPendente = origem;
+    return;
+  }
+  iniciarDescoberta(origem);
+}
+
+/** Algo exclusivo terminou: roda o que esperava a vez, primeiro o teste da mesa. */
+function tentarPendentes() {
+  if (descobertaPendente !== null && !descoberta && !geracao && !releitura && !sessoes.size) {
+    const origem = descobertaPendente;
+    descobertaPendente = null;
+    pedirDescoberta(origem);
+  }
+  tentarReleituraPendente();
+}
+
+/** Botao "Testar a mesa" do app. */
+function testarMesaPeloApp(cliente) {
+  let motivo = null;
+  if (semMesa()) motivo = 'Ligue a mesa no cabo USB: o teste precisa que ela responda.';
+  else if (!acharMolde()) motivo = 'Calibre um controle primeiro (o send de um canal, por exemplo): o teste usa o endereco dele.';
+  else if (descoberta) motivo = 'Ja estou testando a mesa (leva ate uns 20 segundos); espere terminar.';
+  else if (geracao) motivo = 'Estou criando canais agora; teste de novo quando terminar.';
+  else if (releitura) motivo = 'Estou relendo a mesa depois da troca de cena; teste de novo em alguns segundos.';
+  else if (sessoes.size) motivo = 'Alguem esta calibrando um controle agora; teste de novo quando terminar.';
+  if (motivo) {
+    enviarPara(cliente, { type: 'controle:erro', message: motivo });
+    return;
+  }
+  iniciarDescoberta('app');
+}
+
+/**
+ * depois(achou, motivo) roda no fim, ja sem a trava (a criacao de canais usa).
+ * origem 'reconfirmar' (a nova tentativa sozinha) e rapida: so pergunta pelo
+ * caminho guardado (a porta e o n da rota), sem varrer as outras.
+ */
+function iniciarDescoberta(origem, depois = null) {
+  descobertaPendente = null;
+  const d = {
+    origem,
+    rapido: origem === 'reconfirmar' && rotaValeParaSaida(),
+    molde: acharMolde(),
+    depois,
+    cancelada: false,
+    motivoCancelamento: null,
+    pendente: null,
+    portaDaResposta: null,
+    testados: 0,
+    soltas: 0,
+    achado: null,
+    saida: saidaMidi,
+    entrada: entradaMidi,
+    temporarias: { entradas: [], saidas: [] }
+  };
+  descoberta = d;
+  console.log('[mesa] teste da mesa comecou (' + origem + ')');
+  transmitir(mensagemTeste('testando', d));
+
+  let resultado = { achou: false, motivo: 'O teste da mesa parou no meio.' };
+  rodarDescoberta(d)
+    .catch((erro) => {
+      console.error('[mesa] erro no teste da mesa: ' + erro.message);
+      d.cancelada = true;
+      d.motivoCancelamento = 'Algo deu errado no teste da mesa: ' + erro.message;
+    })
+    .then(() => {
+      resultado = concluirDescoberta(d);
+    })
+    .catch((erro) => console.error('[mesa] nao consegui terminar o teste: ' + erro.message))
+    .finally(() => {
+      fecharTemporarias(d);
+      if (descoberta === d) descoberta = null;
+      fimDoUltimoTeste = Date.now();
+      if (d.depois) {
+        try {
+          d.depois(resultado.achou, resultado.motivo);
+        } catch (erro) {
+          console.error('[mesa] erro depois do teste: ' + erro.message);
+        }
+      }
+      tentarPendentes();
+    });
+}
+
+/** A mesa em que o teste comecou saiu do ar (porta trocada, simulada ou morta)? */
+function descobertaSaiuDoAr(d) {
+  return saidaMidi !== d.saida || entradaMidi !== d.entrada || semMesa() ||
+    saidaMidi.sumiu() || entradaMidi.sumiu();
+}
+
+async function rodarDescoberta(d) {
+  if (!d.molde) return;
+  const portas = d.rapido ? { entradas: [], saidas: [] } : listarPortas();
+
+  // Todas as entradas com cara de mesa ficam ouvindo durante o teste: a porta
+  // em que a resposta sai nao e documentada. As que ja estao abertas ficam.
+  // (Na nova tentativa rapida, a resposta vem pela entrada que a rota ja abriu.)
+  const jaAbertas = [entradaMidi.nome, entradaResposta && entradaResposta.nome];
+  for (const nome of portasCandidatas(portas.entradas)) {
+    if (jaAbertas.includes(nome)) continue;
+    const entrada = abrirEntradaDaMesa(nome);
+    if (entrada.simulado) {
+      console.log('[mesa] pulei a entrada "' + nome + '" no teste: ' + entrada.motivo);
+      continue;
+    }
+    d.temporarias.entradas.push(entrada);
+  }
+
+  const dispositivos = d.rapido ? [rota.dispositivo] : ordemDosDispositivos(d.molde);
+  const saidas = d.rapido ? [saidaMidi.nome] : ordemDasSaidas(portas.saidas);
+  for (const nome of saidas) {
+    if (d.cancelada) return;
+    if (descobertaSaiuDoAr(d)) {
+      interromperDescoberta('A mesa saiu do ar no meio do teste. Nada foi gravado.');
+      return;
+    }
+    const atual = nome === saidaMidi.nome;
+    const saida = atual ? saidaMidi : abrirSaida(nome);
+    if (saida.simulado) {
+      console.log('[mesa] pulei a saida "' + nome + '" no teste: ' + saida.motivo);
+      continue;
+    }
+    if (!atual) d.temporarias.saidas.push(saida);
+    if (d.testados) transmitir(mensagemTeste('testando', d));
+
+    for (const n of dispositivos) {
+      if (d.cancelada) return;
+      if (descobertaSaiuDoAr(d)) {
+        interromperDescoberta('A mesa saiu do ar no meio do teste. Nada foi gravado.');
+        return;
+      }
+      if (!atual && saida.sumiu()) break;
+
+      d.testados++;
+      const entrada = await pedirNoTeste(d, saida, n, esperaTeste());
+      if (entrada === null) continue;
+      // Confirma com o mesmo pedido: uma resposta atrasada do n anterior nao
+      // vira rota.
+      const confirmada = await pedirNoTeste(d, saida, n, 3 * esperaTeste());
+      if (confirmada === null) {
+        d.soltas++;
+        console.log('[mesa] resposta sem confirmacao em "' + nome + '" no canal MIDI ' + (n + 1) + ': sigo testando');
+        continue;
+      }
+      // Contra-prova: com outro n a mesa tem que ficar calada. Se "responde",
+      // eram quadros de alguem mexendo nesse send na mesa, nao resposta.
+      if (d.cancelada) return;
+      const outroN = (n + 1) % 16;
+      const intrusa = await pedirNoTeste(d, saida, outroN, 3 * esperaTeste());
+      if (intrusa !== null) {
+        d.soltas++;
+        console.log('[mesa] chegou "resposta" tambem no canal MIDI ' + (outroN + 1) + ' em "' + nome +
+          '": alguem mexendo nesse send na mesa? Descartei e sigo testando');
+        continue;
+      }
+      if (d.cancelada) return;
+      d.achado = { saida, dispositivo: n, entrada: confirmada };
+      return;
+    }
+  }
+}
+
+/** Um pedido de leitura do molde com esse n; devolve a entrada que respondeu, ou null. */
+async function pedirNoTeste(d, saida, n, ms) {
+  if (d.cancelada) return null;
+  const resposta = esperarResposta(d, d.molde, ms);
+  // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
+  enviarMidi(saida, mesa.montarPedidoDoControle(d.molde, n));
+  const raw = await resposta;
+  if (raw === null || d.cancelada) return null;
+  return d.portaDaResposta || entradaMidi.nome;
+}
+
+/** Mesa sumiu ou porta trocada: para o teste sem gravar nada. */
+function interromperDescoberta(motivo) {
+  const d = descoberta;
+  if (!d || d.cancelada) return;
+  d.cancelada = true;
+  d.motivoCancelamento = motivo;
+  console.warn('[mesa] teste da mesa interrompido: ' + motivo);
+  if (d.pendente) d.pendente.responder(null);
+  fecharTemporarias(d);
+}
+
+/** Fecha as portas abertas so para o teste (as que viraram rota ja sairam da lista). */
+function fecharTemporarias(d) {
+  for (const porta of [...d.temporarias.entradas, ...d.temporarias.saidas]) {
+    try { porta.fechar(); } catch { /* ignora */ }
+  }
+  d.temporarias.entradas = [];
+  d.temporarias.saidas = [];
+}
+
+function tirarDaLista(lista, item) {
+  const i = lista.indexOf(item);
+  if (i >= 0) lista.splice(i, 1);
+}
+
+/**
+ * Grava a rota no config.json, sem perder o resto do arquivo. trocarSaida:
+ * a rota foi achada agora, e midi.saida passa a ser a porta dela.
+ */
+function gravarRota(nova, trocarSaida = false) {
+  cfg.midi.rota = nova;
+  if (nova && trocarSaida) cfg.midi.saida = nova.saida;
+  try {
+    const atual = configArquivo.carregar();
+    if (JSON.stringify(atual.midi.rota || null) === JSON.stringify(nova) &&
+      !(nova && trocarSaida && atual.midi.saida !== nova.saida)) return; // nada mudou
+    atual.midi.rota = nova;
+    if (nova && trocarSaida) atual.midi.saida = nova.saida;
+    configArquivo.salvar(atual);
+  } catch (erro) {
+    console.error('[mesa] nao consegui gravar a rota no config.json: ' + erro.message);
+  }
+}
+
+/** Fim do teste: grava a rota, troca a saida se precisar e avisa todos os celulares. */
+function concluirDescoberta(d) {
+  if (d.cancelada) {
+    // Nada gravado: a rota (se havia) continua como estava.
+    console.log('[mesa] fim do teste da mesa: falhou (interrompido)');
+    transmitir(mensagemTeste('falhou', d, { motivo: d.motivoCancelamento, rota: rotaParaApp(rota) }));
+    return { achou: false, motivo: d.motivoCancelamento };
+  }
+
+  if (d.achado) {
+    const { saida, dispositivo } = d.achado;
+    const nova = {
+      saida: saida.nome,
+      entrada: d.achado.entrada || entradaMidi.nome,
+      dispositivo,
+      em: new Date().toISOString(),
+      reconfirmada: true
+    };
+
+    // A saida que respondeu passa a ser a da mesa.
+    tirarDaLista(d.temporarias.saidas, saida);
+    if (saida !== saidaMidi) {
+      try { saidaMidi.fechar(); } catch { /* ignora */ }
+      saidaMidi = saida;
+    }
+    // A entrada que trouxe a resposta, se foi aberta so para o teste, fica.
+    const temporaria = d.temporarias.entradas.find((e) => e.nome === nova.entrada);
+    if (temporaria) {
+      tirarDaLista(d.temporarias.entradas, temporaria);
+      fecharEntradaDaResposta();
+      entradaResposta = temporaria;
+    }
+    rota = nova;
+    abrirEntradaDaResposta(); // fecha a antiga se a resposta agora vem pela principal
+    gravarRota(nova, true);
+
+    console.log('[mesa] a mesa respondeu: saida "' + nova.saida + '", canal MIDI ' + (dispositivo + 1) +
+      ', resposta por "' + nova.entrada + '" (' + d.testados + ' teste(s))');
+    console.log('[mesa] fim do teste da mesa: ok');
+    transmitir(mensagemTeste('ok', d, { rota: rotaParaApp(nova) }));
+    transmitirStatus();
+    return { achou: true, motivo: null };
+  }
+
+  let motivo;
+  if (!d.molde) motivo = 'Nenhum controle calibrado serve de molde para o teste.';
+  else if (!d.testados) motivo = 'Nao achei nenhuma porta da mesa para testar (presa por outro programa?).';
+  else if (d.rapido) motivo = 'A mesa nao respondeu no caminho guardado (' + rota.saida + ', canal MIDI ' + (rota.dispositivo + 1) + ').';
+  else motivo = 'A mesa nao respondeu em nenhuma porta nem canal MIDI (' + d.testados + ' teste(s)).';
+  if (d.soltas) motivo += ' Chegou resposta que nao se confirmou: teste de novo.';
+
+  // Nenhuma porta testada (ex.: presa pelo AirFader): nada muda na rota.
+  // Testou e ninguem respondeu: a rota ja confirmada continua (e o melhor
+  // caminho conhecido, os envios seguem com o n dela), marcada como nao
+  // reconfirmada. Sem rota, continua sem.
+  if (d.testados && rota && rota.reconfirmada) {
+    rota = { ...rota, reconfirmada: false };
+    gravarRota(rota);
+  }
+  console.warn('[mesa] a mesa nao respondeu ao teste' + (rota ? ' (a rota guardada continua)' : '') +
+    '. Confira na mesa: ' + CONFERIR_NA_MESA.join(' | '));
+  console.log('[mesa] fim do teste da mesa: falhou');
+  transmitir(mensagemTeste('falhou', d, { motivo, conferir: CONFERIR_NA_MESA.slice(), rota: rotaParaApp(rota) }));
+  transmitirStatus();
+  return { achou: false, motivo };
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,11 +1830,35 @@ const servidor = http.createServer((req, res) => {
       midi: {
         saida: saidaMidi.nome,
         entrada: entradaMidi.nome,
+        entradaResposta: entradaResposta ? entradaResposta.nome : null,
         simulado: saidaMidi.simulado,
         entradaSimulada: entradaMidi.simulado,
         motivo: saidaMidi.motivo || null,
-        portasVistas: portas.saidas
+        portasVistas: portas.saidas,
+        entradasVistas: portas.entradas
       },
+      // Caixa preta para quem for ajudar de longe: por onde e com qual canal
+      // MIDI o bridge escreve, o que entrou e saiu por ultimo e os moldes.
+      rota: rota
+        ? { saida: rota.saida, entrada: rota.entrada, dispositivo: rota.dispositivo,
+            canalMidi: rota.dispositivo + 1, em: rota.em, reconfirmada: rota.reconfirmada,
+            valeParaSaidaAberta: rotaValeParaSaida() }
+        : null,
+      // "em" e a ultima vez (a linha pode juntar "vezes" mensagens iguais seguidas).
+      ultimosMidi: ultimosMidi.map(({ quando, dir, porta, hex, vezes }) =>
+        ({ em: new Date(quando).toISOString(), dir, porta, hex, vezes })),
+      controlesHex: controles.filter(mesa.estaCalibrado).map((c) => ({
+        id: c.id,
+        rotulo: c.rotulo || c.id,
+        hex: mesa.paraHex(c.template),
+        offset: c.valueOffset,
+        length: c.valueLength,
+        rawMin: c.rawMin,
+        rawMax: c.rawMax,
+        // O comeco que sai de verdade (com o n da rota, se ela vale para esta
+        // saida): o "hex" acima e o molde, com o n do Tx da mesa.
+        enviaCom: mesa.paraHex(mesa.montarFrame(c, 0, dispositivoDaRota()).slice(0, 3))
+      })),
       maquina: {
         sistema: process.platform,
         node: process.version,
@@ -1307,6 +1949,8 @@ wss.on('connection', (cliente, req) => {
   enviarPara(cliente, statusAtual());
   enviarPara(cliente, { type: 'state', values: estado.valores, mutes: estado.mutes });
   enviarPara(cliente, mensagemCena());
+  // Chegou no meio de um teste da mesa: fica sabendo que ele esta rodando.
+  if (descoberta) enviarPara(cliente, mensagemTeste('testando', descoberta));
 
   cliente.on('message', (dados) => {
     let msg;
@@ -1412,6 +2056,11 @@ wss.on('connection', (cliente, req) => {
         iniciarGeracao(cliente, msg);
         return;
 
+      // Botao "Testar a mesa": descobre por qual porta e canal MIDI a mesa obedece.
+      case 'mesa:testar':
+        testarMesaPeloApp(cliente);
+        return;
+
       case 'cena:nomear':
         nomearCena(cliente, msg);
         return;
@@ -1431,10 +2080,15 @@ wss.on('connection', (cliente, req) => {
 
       case 'midi:usar': {
         const escolha = typeof msg.porta === 'string' && msg.porta.trim() ? msg.porta.trim() : null;
+        // No Windows a entrada e a saida podem ter nomes diferentes ("YAMAHA USB
+        // IN 0-1" e "YAMAHA USB OUT 0-1"): se nenhuma entrada tem o nome
+        // escolhido, a entrada volta para a procura automatica.
+        const alvo = escolha ? escolha.toLowerCase() : null;
+        const entrada = alvo && listarPortas().entradas.some((n) => n.toLowerCase().includes(alvo)) ? escolha : null;
         try {
           const atual = configArquivo.carregar();
           atual.midi.saida = escolha;
-          atual.midi.entrada = escolha;
+          atual.midi.entrada = entrada;
           configArquivo.salvar(atual);
         } catch (erro) {
           enviarPara(cliente, { type: 'learn:erro', message: 'Nao consegui salvar: ' + erro.message });
@@ -1442,18 +2096,18 @@ wss.on('connection', (cliente, req) => {
         }
 
         cfg.midi.saida = escolha;
-        cfg.midi.entrada = escolha;
+        cfg.midi.entrada = entrada;
 
         interromperGeracao('a porta da mesa foi trocada');
         interromperReleitura('a porta da mesa foi trocada');
-        try { saidaMidi.fechar(); } catch { /* ignora */ }
-        try { entradaMidi.fechar(); } catch { /* ignora */ }
-        saidaMidi = abrirSaida(cfg.midi.saida);
-        entradaMidi = abrirEntradaDaMesa();
+        interromperDescoberta('A porta da mesa foi trocada no meio do teste. Nada foi gravado.');
+        reabrirPortas();
 
         console.log('[midi] porta escolhida pelo celular: ' + (escolha || 'automatica'));
         contarMidi(false);
         transmitirStatus();
+        // Porta nova sem rota confirmada: testa a mesa nela.
+        pedirDescoberta('conexao');
         return;
       }
 
@@ -1559,6 +2213,9 @@ servidor.listen(porta, host, () => {
     for (const c of controles) if (mesa.estaCalibrado(c)) agendarEnvio(c.id);
     console.log('[midi] reaplicando o ultimo mix salvo na mesa');
   }
+
+  // Mesa no cabo sem rota confirmada nesta saida: testa (o mix acima espera o teste).
+  pedirDescoberta('conexao');
 });
 
 /** IPs da maquina, para voce saber o que digitar no celular. */
@@ -1577,8 +2234,10 @@ function encerrar() {
   console.log('\nEncerrando...');
   despacharFila();
   configArquivo.salvarEstado(estado);
+  if (descoberta) fecharTemporarias(descoberta);
   try { saidaMidi.fechar(); } catch { /* ignora */ }
   try { entradaMidi.fechar(); } catch { /* ignora */ }
+  fecharEntradaDaResposta();
   for (const cliente of wss.clients) {
     try { cliente.close(1001, 'servidor encerrando'); } catch { /* ignora */ }
   }

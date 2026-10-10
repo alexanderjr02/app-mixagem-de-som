@@ -28,6 +28,13 @@ function lerJson(arquivo) {
   return JSON.parse(texto.charCodeAt(0) === 0xfeff ? texto.slice(1) : texto);
 }
 
+// No Windows o rename falha (EPERM/EBUSY/EACCES) se outro programa esta com o
+// arquivo aberto naquele instante: o antivirus olhando o .tmp recem-gravado,
+// ou alguem lendo o arquivo. Dura milissegundos, entao vale tentar de novo.
+const ERROS_DE_ARQUIVO_PRESO = ['EPERM', 'EBUSY', 'EACCES'];
+const TENTATIVAS_RENAME = 10;
+const ESPERA_RENAME_MS = 30;
+
 /**
  * Grava por arquivo temporario + rename: um kill no meio (queda de luz,
  * atualizacao) nunca deixa o arquivo pela metade.
@@ -35,7 +42,16 @@ function lerJson(arquivo) {
 function gravarAtomico(arquivo, texto) {
   const tmp = arquivo + '.tmp';
   fs.writeFileSync(tmp, texto, 'utf8');
-  fs.renameSync(tmp, arquivo);
+  for (let tentativa = 1; ; tentativa++) {
+    try {
+      fs.renameSync(tmp, arquivo);
+      return;
+    } catch (erro) {
+      if (!ERROS_DE_ARQUIVO_PRESO.includes(erro.code) || tentativa >= TENTATIVAS_RENAME) throw erro;
+      // Espera curta e sincrona (quem chama espera a gravacao terminar).
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ESPERA_RENAME_MS);
+    }
+  }
 }
 
 // Valores usados quando a chave nao existe no arquivo.
@@ -48,7 +64,15 @@ const PADRAO = {
     janelaEcoMs: 400,
     intervaloProcuraMs: 10000,
     // Quanto tempo esperar a mesa responder cada Parameter request ao criar canais.
-    esperaRespostaMs: 300
+    esperaRespostaMs: 300,
+    // No teste da mesa (descoberta da rota), quanto esperar cada pedido.
+    esperaTesteMs: 150,
+    // Rota sem resposta no ultimo teste: de quanto em quanto tempo, no
+    // minimo, o bridge pergunta de novo sozinho (so leitura).
+    retestarRotaMs: 60000,
+    // Rota que a mesa confirmou: { saida, entrada, dispositivo, em }. Quem
+    // escreve e o proprio bridge, depois do teste da mesa.
+    rota: null
   },
   aplicarEstadoAoIniciar: false,
   controles: []

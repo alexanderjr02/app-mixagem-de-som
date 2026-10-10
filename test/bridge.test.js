@@ -212,6 +212,7 @@ test('ao conectar, o celular recebe controles, situacao do MIDI e estado', async
 
   const status = await celularA.receber('status');
   assert.equal(status.midi.simulado, true);
+  assert.equal(status.rota, null, 'sem teste da mesa, nao ha rota');
 
   const estado = await celularA.receber('state');
   assert.equal(typeof estado.values.guitarra, 'number');
@@ -346,6 +347,18 @@ test('enquanto alguem calibra, ninguem cria canais (a resposta da mesa cairia na
   assert.match((await celularB.receber('gerar:erro')).message, /cabo USB/);
 });
 
+test('testar a mesa sem ela no cabo e recusado, so para quem pediu, sem mandar nada', async () => {
+  await pausa(INTERVALO_IMPRESSAO);
+  const desde = bridge.linhas.length;
+  celularB.esquecer();
+  celularA.enviar({ type: 'mesa:testar' });
+  assert.match((await celularA.receber('controle:erro')).message, /Ligue a mesa no cabo USB/);
+  await pausa(INTERVALO_IMPRESSAO);
+  assert.equal(celularA.viu('mesa:teste'), false);
+  assert.equal(celularB.viu('controle:erro'), false);
+  assert.deepEqual(enviosDesde(desde), []);
+});
+
 test('a lista do app diz o canal de quem serve de modelo para criar os outros', async () => {
   const { controls } = JSON.parse((await pedir(bridge.porta, 'GET', '/api/controls')).texto);
   const bumbo = controls.find((c) => c.id === 'bumbo');
@@ -470,16 +483,36 @@ test('o ultimo mix vai para o estado.json da pasta de dados', async () => {
  * se a porta some, ou o cabo sai e volta (geracao nova), o envio pela porta
  * antiga falha, como acontece com a porta morta de verdade.
  *
- * Ela tambem responde Parameter request (F0 43 3n ...) como o manual descreve:
- * devolve, pelas entradas abertas, o Parameter change do mesmo endereco com o
- * valor de "enderecos" no arquivo ({ "0D 01 1C 00 00": [0, 64] }, bytes 4 a 8
- * do pedido) ou, sem ele, de "respostas" ({ "2": [0, 64] } = canal 2 responde
- * 64). Ausente nos dois = a mesa fica calada. "atrasos" ({ endereco: ms })
- * faz a resposta daquele endereco demorar.
+ * Portas: "portas" vale para entradas e saidas (um nome so, como no Linux);
+ * "entradas" e "saidas" separam os nomes, como o driver USB da Yamaha no
+ * Windows ("YAMAHA USB IN 0-1" / "YAMAHA USB OUT 0-1").
+ *
+ * Canais e portas como na 01V96 (V2 p.215-218 e p.313-315), todos opcionais
+ * (sem eles, o modelo antigo: aceita tudo e fala por todas as entradas):
+ *   txCh          n com que a mesa MANDA (calibracao, cena): carimbado nos
+ *                 quadros de "emitir".
+ *   rxCh          n que a mesa ACEITA (Parameter change e request).
+ *   rxLigado      false = PARAMETER CHANGE Rx OFF: nao aceita nada.
+ *   portaRx       saida (PC -> mesa) pela qual ela aceita (GENERAL Rx PORT).
+ *   portaTx       entrada (mesa -> PC) por onde saem os quadros de "emitir".
+ *   portaResposta entrada por onde sai a resposta de um pedido.
+ *   respostaCh    n da resposta (o manual diz Rx CH num lugar e Tx CH em
+ *                 outro); sem ele, o rxCh, ou o n do pedido.
+ * Cada quadro recebido vira duas linhas no terminal do bridge:
+ * "[mesa falsa] #<geracao> <hex>" e "[mesa falsa] aceitou|ignorou <porta> | <hex>".
+ * Abrir e fechar entrada tambem: "[mesa falsa] entrada aberta|fechada: <nome>".
+ *
+ * Ela responde Parameter request (F0 43 3n ...) aceito como o manual descreve:
+ * devolve o Parameter change do mesmo endereco com o valor de "enderecos" no
+ * arquivo ({ "0D 01 1C 00 00": [0, 64] }, bytes 4 a 8 do pedido) ou, sem ele,
+ * de "respostas" ({ "2": [0, 64] } = canal 2 responde 64). Ausente nos dois =
+ * a mesa fica calada. "atrasos" ({ endereco: ms }) faz a resposta daquele
+ * endereco demorar.
  *
  * E faz a mesa falar sozinha, como quando a equipe chama uma cena: cada item
  * novo da fila "emitir" ([[1, "C0 02"], [2, "F0 43 ..."]]) vai uma vez, em
- * ordem, para as entradas abertas (o arquivo e lido a cada 15 ms).
+ * ordem (o arquivo e lido a cada 15 ms). "repetir" ("F0 43 ...") vai a cada
+ * 15 ms enquanto estiver no arquivo: alguem mexendo num send sem parar.
  */
 const MESA_FALSA = `
 const Module = require('module');
@@ -488,37 +521,59 @@ const ARQUIVO = process.env.MESA_FALSA;
 function mesa() {
   try { return JSON.parse(fs.readFileSync(ARQUIVO, 'utf8')); } catch { return { portas: [], geracao: 0 }; }
 }
+const nomes = (m, lado) => (Array.isArray(m[lado]) ? m[lado] : m.portas) || [];
+const ehN = (x) => Number.isInteger(x);
 const entradasAbertas = new Set();
 const hex = (bytes) => bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-function entregar(quadro) {
-  for (const entrada of entradasAbertas) if (entrada.aoReceber) entrada.aoReceber(0, quadro.slice());
+function entregar(quadro, porta) {
+  for (const entrada of entradasAbertas) {
+    if (!entrada.aoReceber || (porta && entrada.aberta !== porta)) continue;
+    entrada.aoReceber(0, quadro.slice());
+  }
 }
-function responderPedido(bytes) {
-  if ((bytes[2] & 0xf0) !== 0x30) return;
-  const m = mesa();
+function comTx(m, quadro) {
+  if (!ehN(m.txCh)) return quadro;
+  const q = quadro.slice();
+  if (q[0] === 0xf0 && q[1] === 0x43 && (q[2] & 0xf0) === 0x10) q[2] = 0x10 | m.txCh;
+  else if (q.length === 2 && (q[0] & 0xf0) === 0xc0) q[0] = 0xc0 | m.txCh;
+  return q;
+}
+function aceita(m, bytes, porta) {
+  if (bytes[0] !== 0xf0 || bytes[1] !== 0x43) return false;
+  if (m.rxLigado === false) return false;
+  if (m.portaRx && porta !== m.portaRx) return false;
+  if (ehN(m.rxCh) && (bytes[2] & 0x0f) !== m.rxCh) return false;
+  return true;
+}
+function responderPedido(m, bytes) {
   const endereco = hex(bytes.slice(4, 9));
   const porEndereco = (m.enderecos || {})[endereco];
   const valor = Array.isArray(porEndereco) ? porEndereco : (m.respostas || {})[String(bytes[8] + 1)];
   if (!Array.isArray(valor)) return;
-  const quadro = [0xf0, 0x43, 0x10 | (bytes[2] & 0x0f), ...bytes.slice(3, 9), ...valor, 0xf7];
+  const n = ehN(m.respostaCh) ? m.respostaCh : ehN(m.rxCh) ? m.rxCh : bytes[2] & 0x0f;
+  const quadro = [0xf0, 0x43, 0x10 | n, ...bytes.slice(3, 9), ...valor, 0xf7];
   const atraso = (m.atrasos || {})[endereco];
-  setTimeout(() => entregar(quadro), Number.isFinite(atraso) ? atraso : 5);
+  setTimeout(() => entregar(quadro, m.portaResposta), Number.isFinite(atraso) ? atraso : 5);
 }
 let emitidos = 0;
 setInterval(() => {
-  for (const [n, texto] of mesa().emitir || []) {
+  const m = mesa();
+  for (const [n, texto] of m.emitir || []) {
     if (n <= emitidos) continue;
     emitidos = n;
-    entregar(texto.split(' ').map((h) => parseInt(h, 16)));
+    entregar(comTx(m, texto.split(' ').map((h) => parseInt(h, 16))), m.portaTx);
   }
+  if (m.repetir) entregar(comTx(m, m.repetir.split(' ').map((h) => parseInt(h, 16))), m.portaTx);
 }, 15).unref();
 class Porta {
-  getPortCount() { return mesa().portas.length; }
-  getPortName(i) { return mesa().portas[i] || ''; }
+  lado() { return 'saidas'; }
+  getPortCount() { return nomes(mesa(), this.lado()).length; }
+  getPortName(i) { return nomes(mesa(), this.lado())[i] || ''; }
   openPort(i) {
     const m = mesa();
-    if (!m.portas[i]) throw new Error('Invalid MIDI port number');
-    this.aberta = m.portas[i];
+    const nome = nomes(m, this.lado())[i];
+    if (!nome) throw new Error('Invalid MIDI port number');
+    this.aberta = nome;
     this.geracao = m.geracao;
   }
   closePort() { this.aberta = null; }
@@ -527,18 +582,28 @@ class Porta {
   on() {}
   sendMessage(bytes) {
     const m = mesa();
-    if (!this.aberta || !m.portas.includes(this.aberta) || m.geracao !== this.geracao) {
+    if (!this.aberta || !nomes(m, 'saidas').includes(this.aberta) || m.geracao !== this.geracao) {
       throw new Error('Internal RtMidi error');
     }
-    const hex = bytes.map((b) => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-    console.log('[mesa falsa] #' + this.geracao + ' ' + hex);
-    responderPedido(bytes);
+    console.log('[mesa falsa] #' + this.geracao + ' ' + hex(bytes));
+    const ok = aceita(m, bytes, this.aberta);
+    console.log('[mesa falsa] ' + (ok ? 'aceitou ' : 'ignorou ') + this.aberta + ' | ' + hex(bytes));
+    if (ok && (bytes[2] & 0xf0) === 0x30) responderPedido(m, bytes);
   }
 }
 class Entrada extends Porta {
+  lado() { return 'entradas'; }
   on(evento, aoReceber) { if (evento === 'message') this.aoReceber = aoReceber; }
-  openPort(i) { super.openPort(i); entradasAbertas.add(this); }
-  closePort() { super.closePort(); entradasAbertas.delete(this); }
+  openPort(i) {
+    super.openPort(i);
+    entradasAbertas.add(this);
+    console.log('[mesa falsa] entrada aberta: ' + this.aberta);
+  }
+  closePort() {
+    if (this.aberta) console.log('[mesa falsa] entrada fechada: ' + this.aberta);
+    super.closePort();
+    entradasAbertas.delete(this);
+  }
 }
 const falso = { Input: Entrada, Output: Porta };
 const carregar = Module._load;
@@ -584,6 +649,69 @@ function quadrosParaMesa(linhas, desde) {
     .map((l) => l.slice(l.indexOf('[mesa falsa] #')).split(' ').slice(3).map((h) => parseInt(h, 16)));
 }
 
+/** Os mesmos quadros, com a porta por onde chegaram e se a mesa aceitou. */
+function chegadasNaMesa(linhas, desde = 0) {
+  const marca = /\[mesa falsa\] (aceitou|ignorou) (.+) \| ([0-9A-F ]+)$/;
+  return linhas.slice(desde).map((l) => l.match(marca)).filter(Boolean).map(([, resultado, porta, hex]) => ({
+    aceitou: resultado === 'aceitou',
+    porta,
+    hex,
+    bytes: hex.split(' ').map((h) => parseInt(h, 16))
+  }));
+}
+
+/** Linhas do primeiro teste da mesa que comecou a partir de "desde" (do comeco ao fim). */
+function linhasDoTeste(linhas, desde = 0) {
+  const ini = linhas.findIndex((l, i) => i >= desde && l.includes('[mesa] teste da mesa comecou'));
+  const fim = linhas.findIndex((l, i) => i > ini && l.includes('[mesa] fim do teste da mesa'));
+  assert.ok(ini >= 0 && fim > ini, 'nao achei o comeco e o fim do teste da mesa no terminal');
+  return { linhas: linhas.slice(ini, fim + 1), ini, fim };
+}
+
+/**
+ * Rota ja confirmada (mesa com Rx CH = Tx CH = 1), para os testes que nao
+ * sao sobre o teste da mesa: com ela, o bridge nao testa ao conectar.
+ */
+const rotaConfirmada = (saida = 'YAMAHA 01V96') =>
+  ({ saida, entrada: saida, dispositivo: 0, em: '2026-10-01T10:00:00.000Z' });
+
+/** Bridge com a mesa de teste; mesaFica junta mudancas ao que a mesa tem, mesaEmite faz ela falar. */
+async function bridgeComMesa({ mesaInicial, config, estado }) {
+  const mesaTeste = prepararMesaFalsa();
+  let atual = { geracao: 1, emitir: [], ...mesaInicial };
+  let seq = 0;
+  mesaTeste.fica(atual);
+  let b;
+  try {
+    b = await subirBridge({
+      config, estado, antes: ['--require', mesaTeste.preload], env: { MESA_FALSA: mesaTeste.arquivo }
+    });
+  } catch (erro) {
+    mesaTeste.apagar();
+    throw erro;
+  }
+  return {
+    b,
+    mesaFica(mudancas) {
+      atual = { ...atual, ...mudancas };
+      mesaTeste.fica(atual);
+    },
+    mesaEmite(...mensagens) {
+      atual = { ...atual, emitir: [...atual.emitir, ...mensagens.map((h) => [++seq, h])] };
+      mesaTeste.fica(atual);
+    },
+    lerConfig: () => JSON.parse(fs.readFileSync(path.join(b.pasta, 'config.json'), 'utf8')),
+    status: async () => JSON.parse((await pedir(b.porta, 'GET', '/api/status')).texto),
+    async parar() {
+      try {
+        await b.parar();
+      } finally {
+        mesaTeste.apagar();
+      }
+    }
+  };
+}
+
 test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', async () => {
   const mesaTeste = prepararMesaFalsa();
   const preload = mesaTeste.preload;
@@ -595,7 +723,8 @@ test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', 
     template: MINIMO, valueOffset: 9, valueLength: 2, rawMin: 0, rawMax: 255 };
   const b = await subirBridge({
     config: {
-      midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50, intervaloProcuraMs: 100 },
+      midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50, intervaloProcuraMs: 100,
+        rota: rotaConfirmada() },
       aplicarEstadoAoIniciar: true,
       controles: [bumbo]
     },
@@ -661,7 +790,7 @@ test('criar os outros canais: so nasce controle no canal que a mesa confirmou', 
   const b = await subirBridge({
     config: {
       midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
-        intervaloProcuraMs: 100, esperaRespostaMs: 600 },
+        intervaloProcuraMs: 100, esperaRespostaMs: 600, rota: rotaConfirmada() },
       aplicarEstadoAoIniciar: false,
       controles: [bumbo, caixa, tom, reverb, estranho]
     },
@@ -897,7 +1026,7 @@ test('troca de cena na mesa: o app mostra a cena e rele os faders so com pedidos
   const b = await subirBridge({
     config: {
       midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
-        intervaloProcuraMs: 100, esperaRespostaMs: 300 },
+        intervaloProcuraMs: 100, esperaRespostaMs: 300, rota: rotaConfirmada() },
       aplicarEstadoAoIniciar: false,
       controles: [bumbo, caixa, reverb, master, estranho, guitarra]
     },
@@ -1137,6 +1266,633 @@ test('troca de cena na mesa: o app mostra a cena e rele os faders so com pedidos
     outro.fechar();
     await b.parar();
     mesaTeste.apagar();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Teste da mesa (descoberta da rota): a 01V96 so aceita com o n do Rx CH e
+// pela porta do GENERAL Rx PORT (V2 p.215-218 e p.313-315).
+// ---------------------------------------------------------------------------
+
+const USB = {
+  in1: 'YAMAHA USB IN 0-1',
+  in2: 'YAMAHA USB IN 0-2',
+  out1: 'YAMAHA USB OUT 0-1',
+  out2: 'YAMAHA USB OUT 0-2'
+};
+const SINTETIZADOR = 'Microsoft GS Wavetable Synth';
+
+const midiDeTeste = {
+  entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
+  intervaloProcuraMs: 100, esperaRespostaMs: 300, esperaTesteMs: 100
+};
+
+/** Bumbo calibrado no canal 1, com o molde que a mesa mandou com o n do Tx CH. */
+function bumboDoTx(txCh) {
+  const template = MINIMO.slice();
+  template[2] = 0x10 | txCh;
+  return { id: 'bumbo', rotulo: 'Bumbo', tipo: 'canal', calibrado: true,
+    template, valueOffset: 9, valueLength: 2, rawMin: 0, rawMax: 255 };
+}
+
+const pedidoHex = (controle, n) => mesa.paraHex(mesa.montarPedidoDoControle(controle, n));
+const ehPedido = (chegada) => (chegada.bytes[2] & 0xf0) === 0x30;
+
+test('Rx CH diferente do Tx CH: a primeira calibracao testa a mesa, acha o canal certo e ela passa a obedecer', async (t) => {
+  // A mesa manda com Tx CH 2 (n = 1) e so aceita com Rx CH 4 (n = 3).
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1], saidas: [SINTETIZADOR, USB.out1, USB.out2],
+      txCh: 1, rxCh: 3, portaRx: USB.out1, portaTx: USB.in1, portaResposta: USB.in1,
+      respostas: { 1: [0x00, 0x20], 2: [0x00, 0x40], 3: [0x01, 0x00] }
+    },
+    config: { midi: midiDeTeste, aplicarEstadoAoIniciar: false, controles: [] }
+  });
+  const { b } = m;
+  const celular = await conectarCelular(b.porta);
+  const molde = bumboDoTx(1);
+
+  try {
+    const inicio = await celular.receber('status');
+    assert.equal(inicio.midi.saida, USB.out1);
+    assert.equal(inicio.rota, null);
+
+    await t.test('sem controle calibrado nao ha teste; o botao explica o que falta', async () => {
+      celular.enviar({ type: 'mesa:testar' });
+      assert.match((await celular.receber('controle:erro')).message, /Calibre um controle primeiro/);
+      await pausa(200);
+      assert.deepEqual(chegadasNaMesa(b.linhas), []);
+      assert.equal(celular.viu('mesa:teste'), false);
+    });
+
+    await t.test('salvar a primeira calibracao testa a mesa e acha o canal MIDI 4, so com pedidos de leitura', async () => {
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Bumbo', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      m.mesaEmite(mesa.paraHex(MINIMO)); // a mesa carimba o n do Tx CH
+      assert.equal((await celular.receber('learn:midi')).hex, mesa.paraHex(molde.template));
+      celular.enviar({ type: 'learn:capturar', step: 'min' });
+      await celular.receber('learn:capturado');
+      await pausa(250); // o aviso ao vivo vai no maximo 5 vezes por segundo
+      m.mesaEmite(mesa.paraHex(MAXIMO));
+      await celular.receber('learn:midi');
+      celular.enviar({ type: 'learn:capturar', step: 'max' });
+      await celular.receber('learn:capturado');
+
+      celular.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'learn:salvar' });
+      await celular.receber('learn:salvo');
+      assert.deepEqual(await celular.receber('mesa:teste'),
+        { type: 'mesa:teste', fase: 'testando', rota: null, testados: 0, motivo: null, conferir: [] });
+      assert.deepEqual(await celular.receber('mesa:teste', () => true, 5000), {
+        type: 'mesa:teste', fase: 'ok',
+        rota: { saida: USB.out1, entrada: USB.in1, canalMidi: 4, reconfirmada: true },
+        testados: 4, motivo: null, conferir: []
+      });
+      const status = await celular.receber('status', (x) => x.rota !== null);
+      assert.deepEqual({ ...status.rota, em: typeof status.rota.em },
+        { saida: USB.out1, canalMidi: 4, em: 'string', reconfirmada: true });
+
+      // Na mesa: so pedidos de leitura, um por vez: o n do molde (1), 0, 2, 3,
+      // a confirmacao do 3 e a contra-prova com o 4 (a mesa fica calada).
+      const chegadas = chegadasNaMesa(b.linhas, desde);
+      assert.deepEqual(chegadas.map((c) => c.hex), [1, 0, 2, 3, 3, 4].map((n) => pedidoHex(molde, n)));
+      assert.deepEqual(chegadas.map((c) => c.aceitou), [false, false, false, true, true, false]);
+      assert.ok(chegadas.every(ehPedido), 'saiu Parameter change durante o teste');
+
+      // Gravado no config.json: a saida e a rota.
+      const { midi } = m.lerConfig();
+      assert.equal(midi.saida, USB.out1);
+      assert.deepEqual({ ...midi.rota, em: typeof midi.rota.em },
+        { saida: USB.out1, entrada: USB.in1, dispositivo: 3, em: 'string', reconfirmada: true });
+      assert.equal(midi.rota.em, status.rota.em);
+    });
+
+    await t.test('o fader do celular sai com o n da rota (1 3) e a mesa aceita', async () => {
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'bumbo', value: 1 });
+      const esperado = 'F0 43 13 3E 0D 01 1C 00 00 01 7F F7';
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.hex === esperado && c.aceitou),
+        'a mesa aceitar ' + esperado);
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde).filter((c) => !c.aceitou), [], 'saiu quadro que a mesa ignora');
+    });
+
+    await t.test('criar os outros canais funciona direto, com os pedidos no n da rota', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2, 3] });
+      const fim = await celular.receber('gerar:fim', () => true, 5000);
+      assert.deepEqual(fim.criados,
+        [{ id: 'canal-2', label: 'Canal 2', canal: 2 }, { id: 'canal-3', label: 'Canal 3', canal: 3 }]);
+      assert.deepEqual(fim.semResposta, []);
+      assert.equal(celular.viu('mesa:teste'), false, 'testou de novo com a rota confirmada');
+      const chegadas = chegadasNaMesa(b.linhas, desde);
+      assert.deepEqual(chegadas.map((c) => c.hex), [2, 3].map((canal) => mesa.paraHex(mesa.montarPedido(molde, canal, 3))));
+      assert.ok(chegadas.every((c) => c.aceitou));
+      const estado = await celular.receber('state', (x) => 'canal-3' in x.values);
+      assert.equal(estado.values['canal-3'], 128 / 255);
+
+      // O canal criado guarda o molde do Tx, mas escreve com o n da rota.
+      const desde2 = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'canal-3', value: 1 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde2)
+        .some((c) => c.hex === 'F0 43 13 3E 0D 01 1C 00 02 01 7F F7' && c.aceitou), 'a mesa aceitar o canal 3');
+    });
+
+    await t.test('criando canais, testar a mesa e recusado; depois o teste confirma de primeira', async () => {
+      celular.esquecer();
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [20] }); // canal 20 calado: 300 ms
+      celular.enviar({ type: 'mesa:testar' });
+      assert.match((await celular.receber('controle:erro')).message, /criando canais/);
+      await celular.receber('gerar:fim', () => true, 5000);
+
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'mesa:testar' });
+      const ok = await celular.receber('mesa:teste', (x) => x.fase !== 'testando', 5000);
+      assert.equal(ok.fase, 'ok');
+      assert.equal(ok.testados, 1, 'o n da rota e o primeiro testado');
+      assert.equal(ok.rota.canalMidi, 4);
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde).map((c) => c.hex),
+        [pedidoHex(molde, 3), pedidoHex(molde, 3), pedidoHex(molde, 4)]);
+    });
+
+    await t.test('caixa preta no /api/status: rota, ultimas mensagens com a porta e os moldes em hex', async () => {
+      // Arrastar o fader: varias mensagens do mesmo endereco viram uma linha so.
+      for (const v of [0.1, 0.2, 0.3, 0.4, 0.5]) {
+        celular.enviar({ type: 'set', control: 'bumbo', value: v });
+        await pausa(30);
+      }
+      await pausa(100);
+      const s = await m.status();
+      assert.deepEqual({ ...s.rota, em: typeof s.rota.em }, { saida: USB.out1, entrada: USB.in1, dispositivo: 3,
+        canalMidi: 4, em: 'string', reconfirmada: true, valeParaSaidaAberta: true });
+      assert.ok(s.ultimosMidi.length > 0 && s.ultimosMidi.length <= 40);
+      for (const x of s.ultimosMidi) {
+        assert.deepEqual(Object.keys(x).sort(), ['dir', 'em', 'hex', 'porta', 'vezes']);
+        assert.equal(new Date(x.em).toISOString(), x.em);
+        assert.ok(x.dir === 'entrada' || x.dir === 'saida');
+      }
+      assert.ok(s.ultimosMidi.some((x) => x.dir === 'saida' && x.porta === USB.out1 && x.hex === pedidoHex(molde, 3)),
+        'o pedido do teste, com a porta');
+      assert.ok(s.ultimosMidi.some((x) => x.dir === 'entrada' && x.porta === USB.in1 &&
+        x.hex === 'F0 43 13 3E 0D 01 1C 00 00 00 20 F7'), 'a resposta da mesa, com a porta');
+      const arrasto = s.ultimosMidi.filter((x) => x.dir === 'saida' && x.hex.startsWith('F0 43 13 3E 0D 01 1C 00 00 '));
+      assert.equal(arrasto.at(-1).hex, mesa.paraHex(mesa.montarFrame(molde, 0.5, 3)));
+      assert.ok(arrasto.at(-1).vezes >= 3, 'o arrasto virou ' + arrasto.length + ' linhas');
+
+      assert.deepEqual(s.controlesHex.map((c) => c.id), ['bumbo', 'canal-2', 'canal-3']);
+      // O molde guarda o n do Tx (11); o que sai de verdade leva o n da rota (13).
+      assert.deepEqual(s.controlesHex[0], { id: 'bumbo', rotulo: 'Bumbo',
+        hex: 'F0 43 11 3E 0D 01 1C 00 00 00 00 F7', offset: 9, length: 2, rawMin: 0, rawMax: 255, enviaCom: 'F0 43 13' });
+      assert.equal(s.midi.entradaResposta, null, 'a resposta vem pela entrada principal');
+    });
+
+    await t.test('porta trocada pelo app com calibracao aberta: o fader na porta nova nao usa o n da rota velha', async () => {
+      celular.esquecer();
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      celular.enviar({ type: 'midi:usar', porta: USB.out2 });
+      const status = await celular.receber('status', (x) => x.midi.saida === USB.out2);
+      assert.equal(status.rota.saida, USB.out1, 'a rota guardada continua sendo da USB 1');
+      assert.equal(status.midi.entrada, USB.in1, 'nenhuma entrada se chama USB OUT: volta para a automatica');
+
+      // O teste da porta nova espera a calibracao; o fader, nao. Sai com o n do
+      // molde (11), nunca com o n da rota da outra porta (13).
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'bumbo', value: 1 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.porta === USB.out2), 'o fader sair pela USB 2');
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde).map((c) => c.porta + ' ' + c.hex),
+        [USB.out2 + ' F0 43 11 3E 0D 01 1C 00 00 01 7F F7']);
+      assert.equal(celular.viu('mesa:teste'), false, 'testou com a calibracao aberta');
+      const s = await m.status();
+      assert.equal(s.rota.valeParaSaidaAberta, false);
+      assert.equal(s.controlesHex[0].enviaCom, 'F0 43 11');
+
+      // Calibracao cancelada: o teste que esperava roda, e a mesa so responde pela USB 1.
+      celular.enviar({ type: 'learn:cancelar' });
+      const ok = await celular.receber('mesa:teste', (x) => x.fase !== 'testando', 8000);
+      assert.equal(ok.fase, 'ok');
+      assert.deepEqual(ok.rota, { saida: USB.out1, entrada: USB.in1, canalMidi: 4, reconfirmada: true });
+      assert.equal(m.lerConfig().midi.saida, USB.out1);
+      const pedidos = chegadasNaMesa(b.linhas, desde).slice(1);
+      assert.ok(pedidos.every(ehPedido));
+      assert.deepEqual(pedidos.filter((c) => c.porta === USB.out2).map((c) => c.bytes[2] & 0x0f),
+        [3, 1, 0, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 'na USB 2: o n da rota, o do molde e o resto');
+    });
+  } finally {
+    celular.fechar();
+    await m.parar();
+  }
+});
+
+test('Rx PORT em outra USB: ao conectar, o teste acha a saida certa, abre a entrada da resposta e aceita resposta com outro n', async (t) => {
+  const bumbo = bumboDoTx(0);
+  const caixa = { id: 'caixa', rotulo: 'Caixa', tipo: 'canal', ...mesa.controleParaCanal(bumbo, 2) };
+  // A mesa ouve e responde pela USB 2, com n = 5 na resposta (o manual se
+  // contradiz sobre esse n); calibracao e cena saem pela USB 1.
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1, USB.in2], saidas: [SINTETIZADOR, USB.out1, USB.out2],
+      txCh: 0, rxCh: 0, respostaCh: 5, portaRx: USB.out2, portaTx: USB.in1, portaResposta: USB.in2,
+      respostas: { 1: [0x00, 0x40], 2: [0x01, 0x00] }
+    },
+    config: { midi: midiDeTeste, aplicarEstadoAoIniciar: false, controles: [bumbo, caixa] }
+  });
+  const { b } = m;
+  const celular = await conectarCelular(b.porta);
+
+  try {
+    await t.test('o teste da conexao passa pela USB 1 (calada) e acha a USB 2', async () => {
+      const status = await celular.receber('status', (x) => x.rota !== null, 8000);
+      assert.equal(status.midi.saida, USB.out2);
+      assert.deepEqual({ ...status.rota, em: typeof status.rota.em },
+        { saida: USB.out2, canalMidi: 1, em: 'string', reconfirmada: true });
+
+      const chegadas = chegadasNaMesa(linhasDoTeste(b.linhas).linhas);
+      assert.deepEqual(chegadas.map((c) => c.porta + ' ' + c.hex), [
+        ...Array.from({ length: 16 }, (_, n) => USB.out1 + ' ' + pedidoHex(bumbo, n)),
+        USB.out2 + ' ' + pedidoHex(bumbo, 0),
+        USB.out2 + ' ' + pedidoHex(bumbo, 0),
+        USB.out2 + ' ' + pedidoHex(bumbo, 1) // contra-prova: calada
+      ]);
+      assert.ok(chegadas.every(ehPedido), 'saiu Parameter change durante o teste');
+
+      const { midi } = m.lerConfig();
+      assert.equal(midi.saida, USB.out2);
+      assert.deepEqual({ ...midi.rota, em: typeof midi.rota.em },
+        { saida: USB.out2, entrada: USB.in2, dispositivo: 0, em: 'string', reconfirmada: true });
+
+      // A resposta veio com n = 5, diferente do pedido, e valeu; a USB 2 ficou aberta.
+      const s = await m.status();
+      assert.ok(s.ultimosMidi.some((x) => x.dir === 'entrada' && x.porta === USB.in2 &&
+        x.hex === 'F0 43 15 3E 0D 01 1C 00 00 00 40 F7'));
+      assert.equal(s.midi.entrada, USB.in1);
+      assert.equal(s.midi.entradaResposta, USB.in2);
+    });
+
+    await t.test('troca de cena: chega pela USB 1, a releitura sai pela USB 2 e a resposta volta pela USB 2', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      m.mesaEmite('C0 02');
+      await celular.receber('cena', (x) => x.atual && x.atual.numero === 3);
+      assert.deepEqual(await celular.receber('cena:relida', () => true, 5000),
+        { type: 'cena:relida', numero: 3, lidos: ['bumbo', 'caixa'], semResposta: [] });
+      const estado = await celular.receber('state', (x) => 'caixa' in x.values);
+      assert.deepEqual(estado.values, { bumbo: 64 / 255, caixa: 128 / 255 });
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde).map((c) => c.porta + ' ' + c.hex + ' ' + c.aceitou), [
+        USB.out2 + ' ' + pedidoHex(bumbo, 0) + ' true',
+        USB.out2 + ' ' + pedidoHex(caixa, 0) + ' true'
+      ]);
+      const s = await m.status();
+      assert.ok(s.ultimosMidi.some((x) => x.dir === 'entrada' && x.porta === USB.in1 && x.hex === 'C0 02'),
+        'o Program Change na caixa preta');
+    });
+
+    await t.test('o fader sai pela USB 2 e a mesa aceita', async () => {
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'caixa', value: 1 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.porta === USB.out2 && c.aceitou &&
+        c.hex === 'F0 43 10 3E 0D 01 1C 00 01 01 7F F7'), 'a caixa no maximo pela USB 2');
+    });
+
+    await t.test('cabo sai e volta: reabre as duas entradas e nao testa de novo', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      m.mesaFica({ geracao: 2 });
+      celular.enviar({ type: 'set', control: 'caixa', value: 0.5 }); // falha na porta velha
+      await celular.receber('status', () => true, 5000);
+      const entradas = () => b.linhas.slice(desde).filter((l) => l.includes('[mesa falsa] entrada '))
+        .map((l) => l.slice(l.indexOf('entrada ')));
+      await esperarAte(() => entradas().filter((l) => l.startsWith('entrada aberta')).length >= 2, 'reabrir as duas entradas');
+      assert.deepEqual(entradas().sort(), [
+        'entrada aberta: ' + USB.in1, 'entrada aberta: ' + USB.in2,
+        'entrada fechada: ' + USB.in1, 'entrada fechada: ' + USB.in2
+      ]);
+
+      m.mesaEmite('C0 03');
+      const relida = await celular.receber('cena:relida', (x) => x.numero === 4, 5000);
+      assert.deepEqual(relida.lidos, ['bumbo', 'caixa'], 'a resposta pela USB 2 parou de chegar');
+      assert.equal(celular.viu('mesa:teste'), false, 'testou de novo sem precisar');
+    });
+
+    await t.test('a entrada das respostas some e volta: o bridge reabre ela sozinho', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      const eventos = () => b.linhas.slice(desde).filter((l) => l.includes('[mesa falsa] entrada ') && l.includes(USB.in2))
+        .map((l) => l.slice(l.indexOf('entrada ')));
+      m.mesaFica({ entradas: [USB.in1] }); // a USB 2 de entrada some da lista
+      await esperarAte(() => eventos().includes('entrada fechada: ' + USB.in2), 'fechar a entrada das respostas');
+      await pausa(300); // algumas voltas do procurarMesa sem a USB 2
+      assert.equal((await m.status()).midi.entradaResposta, null);
+
+      m.mesaFica({ entradas: [USB.in1, USB.in2] });
+      await esperarAte(() => eventos().at(-1) === 'entrada aberta: ' + USB.in2, 'reabrir a entrada das respostas');
+      assert.equal((await m.status()).midi.entradaResposta, USB.in2);
+      m.mesaEmite('C0 04');
+      const relida = await celular.receber('cena:relida', (x) => x.numero === 5, 5000);
+      assert.deepEqual(relida.lidos, ['bumbo', 'caixa'], 'a resposta pela USB 2 nao voltou');
+      assert.equal(celular.viu('mesa:teste'), false);
+    });
+
+    await t.test('a mesa some no meio de um teste: ele para sem gravar nada', async () => {
+      m.mesaFica({ portaRx: 'nenhuma' }); // a mesa para de responder: o teste fica pedindo
+      const antes = m.lerConfig().midi;
+      celular.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'mesa:testar' });
+      await celular.receber('mesa:teste', (x) => x.fase === 'testando');
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).length >= 2, 'o teste comecar a pedir');
+      m.mesaFica({ entradas: [], saidas: [SINTETIZADOR] });
+
+      const falhou = await celular.receber('mesa:teste', (x) => x.fase === 'falhou', 5000);
+      assert.match(falhou.motivo, /saiu do (cabo|ar) no meio do teste\. Nada foi gravado\./);
+      assert.deepEqual(falhou.rota, { saida: USB.out2, entrada: USB.in2, canalMidi: 1, reconfirmada: true },
+        'a rota boa vem como estava');
+      assert.deepEqual(falhou.conferir, []);
+      const status = await celular.receber('status', (x) => x.midi.simulado === true, 5000);
+      assert.equal(status.rota.saida, USB.out2, 'a rota boa continua');
+      assert.deepEqual(m.lerConfig().midi, antes, 'gravou algo com a mesa saindo no meio');
+      assert.ok(chegadasNaMesa(b.linhas, desde).every(ehPedido));
+    });
+  } finally {
+    celular.fechar();
+    await m.parar();
+  }
+});
+
+test('a mesa nao responde: o teste falha com o que conferir, sem Parameter change, e nada roda junto com ele', async (t) => {
+  const bumbo = bumboDoTx(0);
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1, USB.in2], saidas: [USB.out1, USB.out2],
+      txCh: 0, rxCh: 0, rxLigado: false, portaTx: USB.in1, portaResposta: USB.in1,
+      respostas: { 1: [0x00, 0x40], 2: [0x00, 0x10] }
+    },
+    config: {
+      // Rota velha, de uma porta que nao existe mais: o n dela e o primeiro testado.
+      midi: { ...midiDeTeste, rota: { saida: 'YAMAHA USB OUT 0-9', entrada: USB.in1, dispositivo: 7, em: '2026-10-01T10:00:00.000Z' } },
+      aplicarEstadoAoIniciar: true,
+      controles: [bumbo]
+    },
+    // O mix guardado volta para a mesa ao ligar: tem que esperar o teste acabar.
+    estado: { valores: { bumbo: 1 }, mutes: {} }
+  });
+  const { b } = m;
+  const celular = await conectarCelular(b.porta);
+  const outro = await conectarCelular(b.porta);
+
+  try {
+    await t.test('o teste da conexao falha, diz o que conferir na mesa e fecha a entrada extra', async () => {
+      const falhou = await celular.receber('mesa:teste', (x) => x.fase === 'falhou', 10000);
+      // A rota guardada nao some: continua, marcada como nao reconfirmada.
+      assert.deepEqual(falhou.rota, { saida: 'YAMAHA USB OUT 0-9', entrada: USB.in1, canalMidi: 8, reconfirmada: false });
+      assert.equal(falhou.testados, 32);
+      assert.match(falhou.motivo, /nao respondeu em nenhuma porta nem canal MIDI \(32 teste/);
+      const texto = falhou.conferir.join('\n');
+      for (const trecho of ['MIDI | SETUP', 'PARAMETER CHANGE', 'Rx ON', 'Tx e Rx', 'DIO/SETUP | MIDI/HOST',
+        'GENERAL Rx PORT', 'Tx PORT', '"AirFader"']) {
+        assert.ok(texto.includes(trecho), 'falta "' + trecho + '" no que conferir');
+      }
+      assert.doesNotMatch(texto, /<[a-z/]/i, 'HTML no texto do que conferir');
+
+      // Durante o teste: so pedidos de leitura, 16 por saida. Antes dele, nada.
+      const teste = linhasDoTeste(b.linhas);
+      const durante = chegadasNaMesa(teste.linhas);
+      assert.deepEqual(durante.map((c) => c.porta), [...Array(16).fill(USB.out1), ...Array(16).fill(USB.out2)]);
+      assert.ok(durante.every(ehPedido), 'saiu Parameter change durante o teste');
+      // Em cada saida: o n da rota velha (7), o do molde (0) e o resto de 0 a 15.
+      assert.deepEqual(durante.slice(0, 16).map((c) => c.bytes[2] & 0x0f), [7, 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15]);
+      assert.deepEqual(chegadasNaMesa(b.linhas.slice(0, teste.ini)), []);
+      // O mix guardado (Parameter change) so sai depois que o teste acaba.
+      await esperarAte(() => chegadasNaMesa(b.linhas, teste.fim).some((c) => c.hex === mesa.paraHex(MAXIMO)),
+        'o mix guardado sair depois do teste');
+
+      const { midi } = m.lerConfig();
+      assert.deepEqual(midi.rota, { saida: 'YAMAHA USB OUT 0-9', entrada: USB.in1, dispositivo: 7,
+        em: '2026-10-01T10:00:00.000Z', reconfirmada: false }, 'a rota guardada sumiu ou nao foi marcada');
+      assert.equal(midi.saida, null, 'mexeu na porta sem achar rota');
+      const s = await m.status();
+      assert.equal(s.rota.reconfirmada, false);
+      assert.equal(s.rota.valeParaSaidaAberta, false, 'a rota e de outra porta');
+      assert.equal(s.midi.entradaResposta, null);
+      // Rota de outra porta: o mix saiu com o n do molde (MAXIMO), nao com o 7 da rota.
+      assert.equal(s.controlesHex[0].enviaCom, 'F0 43 10');
+      assert.ok(s.avisos.some((l) => l.includes('nao respondeu ao teste') && l.includes('PARAMETER CHANGE')),
+        'o que conferir no diagnostico');
+      const extra = b.linhas.filter((l) => l.includes('[mesa falsa] entrada ') && l.includes(USB.in2))
+        .map((l) => l.slice(l.indexOf('entrada ')));
+      assert.deepEqual(extra, ['entrada aberta: ' + USB.in2, 'entrada fechada: ' + USB.in2]);
+    });
+
+    await t.test('criar canais sem rota testa antes; no meio do teste o resto espera ou e recusado', async () => {
+      celular.esquecer();
+      outro.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] });
+      await celular.receber('mesa:teste', (x) => x.fase === 'testando');
+
+      outro.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      assert.deepEqual(await outro.receber('learn:erro'), {
+        type: 'learn:erro',
+        message: 'Estou testando a mesa agora (pode levar ate uns 20 segundos). Espere terminar para calibrar.',
+        etapa: 'nome'
+      });
+      outro.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [3] });
+      assert.match((await outro.receber('gerar:erro')).message, /testando a mesa/);
+      outro.enviar({ type: 'mesa:testar' });
+      assert.match((await outro.receber('controle:erro')).message, /Ja estou testando a mesa/);
+      m.mesaEmite('C0 02'); // a equipe chama a cena 3 no meio do teste
+      await celular.receber('cena', (x) => x.atual && x.atual.numero === 3);
+
+      assert.equal((await celular.receber('mesa:teste', (x) => x.fase === 'falhou', 10000)).testados, 32);
+      assert.match((await celular.receber('gerar:erro', () => true, 3000)).message,
+        /nao respondeu ao teste, entao nao criei nenhum canal/);
+      // A releitura da cena esperou o teste e rodou depois dele.
+      assert.deepEqual(await celular.receber('cena:relida', () => true, 5000),
+        { type: 'cena:relida', numero: 3, lidos: [], semResposta: ['bumbo'] });
+      assert.equal(celular.viu('gerar:fim'), false);
+      assert.equal(outro.viu('learn:pronto-para'), false);
+
+      const teste = linhasDoTeste(b.linhas, desde);
+      assert.equal(chegadasNaMesa(teste.linhas).length, 32);
+      assert.deepEqual(chegadasNaMesa(b.linhas, teste.fim).map((c) => c.hex), [pedidoHex(bumbo, 0)],
+        'depois do teste, so o pedido da releitura');
+      assert.ok(chegadasNaMesa(b.linhas, desde).every(ehPedido));
+    });
+
+    await t.test('com calibracao aberta ou releitura rodando, testar a mesa e recusado', async () => {
+      celular.esquecer();
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      celular.enviar({ type: 'mesa:testar' });
+      assert.match((await celular.receber('controle:erro')).message, /calibrando um controle agora/);
+      celular.enviar({ type: 'learn:cancelar' });
+      await pausa(50);
+
+      const desde = b.linhas.length;
+      m.mesaEmite('C0 04'); // cena 5: a releitura espera 300 ms pela mesa calada
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).length >= 1, 'o pedido da releitura');
+      celular.enviar({ type: 'mesa:testar' });
+      assert.match((await celular.receber('controle:erro')).message, /relendo a mesa/);
+      await celular.receber('cena:relida', (x) => x.numero === 5, 5000);
+      assert.equal(celular.viu('mesa:teste'), false);
+    });
+
+    await t.test('alguem mexendo no mesmo send durante o teste nao vira rota falsa (contra-prova)', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      // A mesa continua surda (Rx OFF), mas o send do bumbo chega sem parar,
+      // como alguem arrastando o fader na mesa durante o teste.
+      m.mesaFica({ repetir: 'F0 43 10 3E 0D 01 1C 00 00 00 30 F7' });
+      try {
+        celular.enviar({ type: 'mesa:testar' });
+        const fim = await celular.receber('mesa:teste', (x) => x.fase !== 'testando', 15000);
+        assert.equal(fim.fase, 'falhou', 'quadro da mesa virou rota');
+        assert.match(fim.motivo, /nao se confirmou/);
+        assert.deepEqual(fim.rota, { saida: 'YAMAHA USB OUT 0-9', entrada: USB.in1, canalMidi: 8, reconfirmada: false });
+      } finally {
+        m.mesaFica({ repetir: null });
+      }
+      // Em cada n "achado", a contra-prova com o n seguinte tambem recebeu o quadro: descartado.
+      const teste = linhasDoTeste(b.linhas, desde);
+      assert.ok(teste.linhas.some((l) => l.includes('alguem mexendo nesse send na mesa')));
+      assert.ok(chegadasNaMesa(teste.linhas).every(ehPedido));
+      assert.equal(m.lerConfig().midi.rota.dispositivo, 7, 'a rota guardada mudou');
+      await pausa(100);
+    });
+
+    await t.test('com o Rx ligado no canal MIDI 16, o criar canais acha a rota e continua sozinho', async () => {
+      m.mesaFica({ rxLigado: true, rxCh: 15 });
+      celular.esquecer();
+      outro.esquecer();
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] });
+      await celular.receber('mesa:teste', (x) => x.fase === 'testando');
+      outro.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] });
+      assert.match((await outro.receber('gerar:erro')).message, /testando a mesa/);
+
+      const ok = await celular.receber('mesa:teste', (x) => x.fase === 'ok', 8000);
+      assert.deepEqual(ok.rota, { saida: USB.out1, entrada: USB.in1, canalMidi: 16, reconfirmada: true });
+      assert.equal(ok.testados, 16);
+      const fim = await celular.receber('gerar:fim', () => true, 5000);
+      assert.deepEqual(fim.criados, [{ id: 'canal-2', label: 'Canal 2', canal: 2 }]);
+      assert.equal(outro.viu('gerar:fim'), false, 'o pedido recusado rodou');
+
+      // n da rota velha (7), o do molde (0), o resto; confirmacao do 15,
+      // contra-prova com o 0 (calada) e o pedido do canal 2 ja no n 15.
+      const ordem = [7, 0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+      const chegadas = chegadasNaMesa(b.linhas, desde);
+      assert.deepEqual(chegadas.map((c) => c.hex), [
+        ...ordem.map((n) => pedidoHex(bumbo, n)),
+        pedidoHex(bumbo, 15),
+        pedidoHex(bumbo, 0),
+        mesa.paraHex(mesa.montarPedido(bumbo, 2, 15))
+      ]);
+      assert.deepEqual(chegadas.map((c) => c.aceitou), [...Array(15).fill(false), true, true, false, true]);
+      assert.equal(m.lerConfig().midi.rota.dispositivo, 15);
+      assert.equal(m.lerConfig().midi.rota.reconfirmada, true);
+    });
+  } finally {
+    celular.fechar();
+    outro.fechar();
+    await m.parar();
+  }
+});
+
+test('rota confirmada que fica sem resposta: continua valendo, nao reconfirmada, e o app pergunta de novo sozinho', async (t) => {
+  const bumbo = bumboDoTx(0);
+  // A mesa escuta no canal MIDI 3 (n = 2) pela USB 1; o caminho ja foi confirmado antes.
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1], saidas: [USB.out1],
+      txCh: 0, rxCh: 2, portaRx: USB.out1, portaTx: USB.in1, portaResposta: USB.in1,
+      respostas: { 1: [0x00, 0x40] }
+    },
+    config: {
+      midi: { ...midiDeTeste, retestarRotaMs: 3000,
+        rota: { saida: USB.out1, entrada: USB.in1, dispositivo: 2, em: '2026-10-01T10:00:00.000Z' } },
+      aplicarEstadoAoIniciar: false,
+      controles: [bumbo]
+    }
+  });
+  const { b } = m;
+  const celular = await conectarCelular(b.porta);
+  const fader = (valor) => mesa.paraHex(mesa.montarFrame(bumbo, valor, 2));
+
+  try {
+    const inicio = await celular.receber('status');
+    assert.deepEqual(inicio.rota, { saida: USB.out1, canalMidi: 3, em: '2026-10-01T10:00:00.000Z', reconfirmada: true });
+    await pausa(300);
+    assert.equal(celular.viu('mesa:teste'), false, 'testou com a rota confirmada');
+
+    await t.test('Rx desligado e Testar: falha, mas a rota fica (nao reconfirmada) e o fader continua no n dela', async () => {
+      m.mesaFica({ rxLigado: false });
+      celular.esquecer();
+      celular.enviar({ type: 'mesa:testar' });
+      const falhou = await celular.receber('mesa:teste', (x) => x.fase === 'falhou', 8000);
+      assert.deepEqual(falhou.rota, { saida: USB.out1, entrada: USB.in1, canalMidi: 3, reconfirmada: false });
+      assert.equal(falhou.testados, 16);
+      assert.ok(falhou.conferir.length > 0);
+      const status = await celular.receber('status', (x) => x.rota && x.rota.reconfirmada === false);
+      assert.equal(status.rota.canalMidi, 3);
+      assert.deepEqual(m.lerConfig().midi.rota, { saida: USB.out1, entrada: USB.in1, dispositivo: 2,
+        em: '2026-10-01T10:00:00.000Z', reconfirmada: false });
+
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'bumbo', value: 1 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.hex === fader(1)), 'o fader sair no n da rota');
+    });
+
+    await t.test('calibrar com a rota nao reconfirmada testa a mesa de novo (nao so na primeira calibracao)', async () => {
+      celular.esquecer();
+      celular.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      await celular.receber('learn:pronto-para');
+      m.mesaEmite('F0 43 10 3E 0D 01 1C 00 01 00 00 F7');
+      await celular.receber('learn:midi');
+      celular.enviar({ type: 'learn:capturar', step: 'min' });
+      await celular.receber('learn:capturado');
+      await pausa(250);
+      m.mesaEmite('F0 43 10 3E 0D 01 1C 00 01 01 7F F7');
+      await celular.receber('learn:midi');
+      celular.enviar({ type: 'learn:capturar', step: 'max' });
+      await celular.receber('learn:capturado');
+      celular.enviar({ type: 'learn:salvar' });
+      await celular.receber('learn:salvo');
+      await celular.receber('mesa:teste', (x) => x.fase === 'testando');
+      const falhou = await celular.receber('mesa:teste', (x) => x.fase !== 'testando', 8000);
+      assert.equal(falhou.fase, 'falhou');
+      assert.equal(falhou.rota.reconfirmada, false);
+    });
+
+    await t.test('Rx religado: o fader sai com o n da rota e a mesa aceita', async () => {
+      m.mesaFica({ rxLigado: true });
+      const desde = b.linhas.length;
+      celular.enviar({ type: 'set', control: 'bumbo', value: 0.5 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.hex === fader(0.5) && c.aceitou),
+        'a mesa aceitar o fader no n da rota');
+    });
+
+    await t.test('sem ninguem pedir, o app reconfirma a rota (so pergunta pelo caminho guardado)', async () => {
+      celular.esquecer();
+      const desde = b.linhas.length;
+      await celular.receber('mesa:teste', (x) => x.fase === 'testando', 10000);
+      const ok = await celular.receber('mesa:teste', () => true, 5000);
+      assert.equal(ok.fase, 'ok');
+      assert.deepEqual(ok.rota, { saida: USB.out1, entrada: USB.in1, canalMidi: 3, reconfirmada: true });
+      assert.equal(ok.testados, 1);
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde).map((c) => c.hex),
+        [pedidoHex(bumbo, 2), pedidoHex(bumbo, 2), pedidoHex(bumbo, 3)], 'pedido, confirmacao e contra-prova');
+      await celular.receber('status', (x) => x.rota && x.rota.reconfirmada === true);
+      assert.equal(m.lerConfig().midi.rota.reconfirmada, true);
+      // Reconfirmada: nao pergunta de novo.
+      celular.esquecer();
+      await pausa(3500);
+      assert.equal(celular.viu('mesa:teste'), false);
+      assert.equal(chegadasNaMesa(b.linhas, desde).length, 3);
+    });
+  } finally {
+    celular.fechar();
+    await m.parar();
   }
 });
 

@@ -125,6 +125,62 @@ test('salvar e salvarEstado gravam por arquivo temporario: nunca deixam .tmp nem
   assert.deepEqual(config.carregarEstado().valores, { a: 1 });
 });
 
+/** Faz o rename falhar com "codigo" nas primeiras "vezes" chamadas (como o Windows com o arquivo preso). */
+function comRenamePreso(codigo, vezes, corpo) {
+  const original = fs.renameSync;
+  let chamadas = 0;
+  fs.renameSync = (...args) => {
+    chamadas++;
+    if (chamadas <= vezes) {
+      const erro = new Error(codigo + ': operation not permitted, rename');
+      erro.code = codigo;
+      throw erro;
+    }
+    return original.apply(fs, args);
+  };
+  try {
+    corpo();
+  } finally {
+    fs.renameSync = original;
+  }
+  return chamadas;
+}
+
+test('gravar tenta de novo quando o Windows segura o arquivo por um instante (antivirus, leitor)', () => {
+  for (const codigo of ['EPERM', 'EBUSY', 'EACCES']) {
+    const chamadas = comRenamePreso(codigo, 2, () => config.salvarEstado({ valores: { bumbo: 0.3 }, mutes: {} }));
+    assert.equal(chamadas, 3, codigo);
+    assert.deepEqual(config.carregarEstado().valores, { bumbo: 0.3 });
+  }
+  escreverConfig({ controles: [] });
+  const cfg = config.carregar();
+  cfg.midi.rota = { saida: 'YAMAHA USB OUT 0-2', entrada: 'YAMAHA USB IN 0-2', dispositivo: 3, em: 'x' };
+  comRenamePreso('EPERM', 3, () => config.salvar(cfg));
+  assert.equal(config.carregar().midi.rota.dispositivo, 3);
+  assert.deepEqual(fs.readdirSync(PASTA).filter((n) => n.endsWith('.tmp')), []);
+});
+
+test('arquivo preso que nao solta, ou outro erro, continua aparecendo (sem laco infinito)', () => {
+  escreverConfig({ controles: [] });
+  const cfg = config.carregar();
+  let chamadas = comRenamePreso('EPERM', 1000, () => assert.throws(() => config.salvar(cfg), /EPERM/));
+  assert.equal(chamadas, 10);
+  chamadas = comRenamePreso('ENOSPC', 1000, () => assert.throws(() => config.salvar(cfg), /ENOSPC/));
+  assert.equal(chamadas, 1, 'erro que nao e de arquivo preso nao tenta de novo');
+});
+
+test('a rota do teste da mesa sobrevive a qualquer gravacao e comeca vazia', () => {
+  assert.equal(config.carregar().midi.rota, null);
+  assert.equal(config.carregar().midi.esperaTesteMs, 150);
+  const rota = { saida: 'YAMAHA USB OUT 0-1', entrada: 'YAMAHA USB IN 0-1', dispositivo: 3, em: '2026-10-10T10:00:00.000Z' };
+  escreverConfig({ midi: { saida: 'YAMAHA USB OUT 0-1', rota }, controles: [] });
+  const cfg = config.carregar();
+  cfg.aplicarEstadoAoIniciar = true;
+  config.salvar(cfg);
+  assert.deepEqual(config.carregar().midi.rota, rota);
+  assert.equal(config.carregar().midi.saida, 'YAMAHA USB OUT 0-1');
+});
+
 test('a ultima cena vista volta junto com o mix do estado.json', () => {
   const cena = { atual: { numero: 3, em: '2026-10-05T10:00:00.000Z', origem: 'programa', bruto: 'C0 02' }, vistas: [1, 3] };
   config.salvarEstado({ valores: { bumbo: 0.7 }, mutes: {}, cena });

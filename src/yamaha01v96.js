@@ -111,11 +111,51 @@ function validarControle(controle) {
   return problemas;
 }
 
+// ---------------------------------------------------------------------------
+// Device number (o "n" de F0 43 1n / 3n), 01V96 V2 p.218 e p.313-315
+//
+// A mesa MANDA com o Tx CH e so ACEITA (Parameter change e Parameter request)
+// quando o n bate com o Rx CH. Tx e Rx sao ajustes separados em MIDI | Setup,
+// entao o n do molde capturado (Tx) nao serve para escrever: quem diz o n de
+// escrita e a rota descoberta pelo bridge. A resposta a um pedido pode voltar
+// com o Rx CH ou com o Tx CH (o manual se contradiz), entao, ao LER, o n e
+// ignorado: so o endereco importa.
+// ---------------------------------------------------------------------------
+
+const POSICAO_DISPOSITIVO = 2;
+
+/** O byte 2 do molde e o "1n" de um Parameter change da Yamaha? */
+function temDispositivo(t) {
+  return Array.isArray(t) && t[1] === 0x43 && (t[POSICAO_DISPOSITIVO] & 0xf0) === 0x10;
+}
+
+function dispositivoValido(n) {
+  return Number.isInteger(n) && n >= 0 && n <= 0x0f;
+}
+
+/** n do molde (o Tx CH de quando foi calibrado), ou null fora do formato Yamaha. */
+function dispositivoDoControle(controle) {
+  if (!controle || !temDispositivo(controle.template)) return null;
+  return controle.template[POSICAO_DISPOSITIVO] & 0x0f;
+}
+
+/** n de escrita: o da rota quando ha rota, senao o do molde (comportamento antigo). */
+function dispositivoDeEscrita(t, dispositivo) {
+  return dispositivoValido(dispositivo) ? dispositivo : t[POSICAO_DISPOSITIVO] & 0x0f;
+}
+
+/** Byte i igual, mas no byte do device so a metade de cima (1n) conta. */
+function mesmoByte(t, i, b) {
+  if (i === POSICAO_DISPOSITIVO && temDispositivo(t)) return (b & 0xf0) === (t[i] & 0xf0);
+  return b === t[i];
+}
+
 /**
  * Monta o quadro SysEx pronto para enviar, a partir do template do controle
- * e de um valor 0..1 vindo do celular.
+ * e de um valor 0..1 vindo do celular. Com "dispositivo" (0 a 15, o da rota),
+ * o n do quadro e trocado por ele; sem, vai o n do molde.
  */
-function montarFrame(controle, valor01) {
+function montarFrame(controle, valor01, dispositivo = null) {
   if (!estaCalibrado(controle)) {
     throw new Error('Controle "' + controle.id + '" ainda nao foi calibrado');
   }
@@ -125,24 +165,28 @@ function montarFrame(controle, valor01) {
   for (let i = 0; i < controle.valueLength; i++) {
     frame[controle.valueOffset + i] = bytes[i];
   }
+  if (dispositivoValido(dispositivo) && temDispositivo(frame)) {
+    frame[POSICAO_DISPOSITIVO] = 0x10 | dispositivo;
+  }
   return frame;
 }
 
 /**
  * Se o quadro recebido da mesa pertence a este controle (mesmo endereco, so
  * o valor diferente), devolve o valor cru. Senao, devolve null.
- * Serve para o app acompanhar quando alguem mexe direto na mesa.
+ * Serve para o app acompanhar quando alguem mexe direto na mesa e para
+ * reconhecer a resposta de um pedido. O n do device nao entra na conta.
  */
 function lerValorDoFrame(controle, frame) {
   if (!estaCalibrado(controle)) return null;
   const t = controle.template;
-  if (frame.length !== t.length) return null;
+  if (!frame || frame.length !== t.length) return null;
 
   const ini = controle.valueOffset;
   const fim = ini + controle.valueLength;
   for (let i = 0; i < t.length; i++) {
     if (i >= ini && i < fim) continue; // posicao do valor: pode diferir
-    if (frame[i] !== t[i]) return null; // endereco diferente: nao e este controle
+    if (!mesmoByte(t, i, frame[i])) return null; // endereco diferente: nao e este controle
   }
   return decodificarValor(frame.slice(ini, fim));
 }
@@ -292,12 +336,13 @@ function controleParaCanal(controle, canal) {
 /**
  * Parameter request do endereco do controle naquele canal. A mesa responde
  * com um Parameter change do mesmo endereco trazendo o valor atual; pedir
- * nunca muda nada no som.
+ * nunca muda nada no som. "dispositivo" (o n da rota) como em montarFrame.
  */
-function montarPedido(controle, canal) {
+function montarPedido(controle, canal, dispositivo = null) {
   exigirCanal(controle, canal);
   const t = controle.template;
-  return [INICIO_SYSEX, 0x43, 0x30 | (t[2] & 0x0f), t[3], t[4], t[5], t[6], t[7], canal - 1, FIM_SYSEX];
+  const n = dispositivoDeEscrita(t, dispositivo);
+  return [INICIO_SYSEX, 0x43, 0x30 | n, t[3], t[4], t[5], t[6], t[7], canal - 1, FIM_SYSEX];
 }
 
 /**
@@ -306,10 +351,11 @@ function montarPedido(controle, canal) {
  * Devolve null se o molde nao esta no formato do manual: ai nao ha como
  * pedir com seguranca, e o controle simplesmente nao e relido.
  */
-function montarPedidoDoControle(controle) {
+function montarPedidoDoControle(controle, dispositivo = null) {
   if (!noFormatoDoManual(controle)) return null;
   const t = controle.template;
-  return [INICIO_SYSEX, 0x43, 0x30 | (t[2] & 0x0f), t[3], t[4], t[5], t[6], t[7], t[POSICAO_CANAL], FIM_SYSEX];
+  const n = dispositivoDeEscrita(t, dispositivo);
+  return [INICIO_SYSEX, 0x43, 0x30 | n, t[3], t[4], t[5], t[6], t[7], t[POSICAO_CANAL], FIM_SYSEX];
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +409,11 @@ function cenaDoSysex(bytes) {
   return numero < TOTAL_CENAS ? numero : null;
 }
 
-/** true se os dois controles apontam para o mesmo endereco (so o valor pode mudar). */
+/**
+ * true se os dois controles apontam para o mesmo endereco (so o valor pode
+ * mudar). O n do device nao conta: o mesmo send calibrado com outro Tx CH
+ * continua sendo o mesmo send.
+ */
 function mesmoEndereco(a, b) {
   if (!estaCalibrado(a) || !estaCalibrado(b)) return false;
   if (a.template.length !== b.template.length) return false;
@@ -373,8 +423,15 @@ function mesmoEndereco(a, b) {
   const fim = ini + a.valueLength;
   for (let i = 0; i < a.template.length; i++) {
     if (i >= ini && i < fim) continue;
-    if (a.template[i] !== b.template[i]) return false;
+    if (!mesmoByte(a.template, i, b.template[i])) return false;
   }
+  return true;
+}
+
+/** Mesmo cabecalho F0 43 1n 3E 0D tt ee pp (bytes 0 a 7), sem contar o n. */
+function mesmoCabecalho(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length < 8 || b.length < 8) return false;
+  for (let i = 0; i < 8; i++) if (!mesmoByte(a, i, b[i])) return false;
   return true;
 }
 
@@ -421,6 +478,8 @@ module.exports = {
   montarPedido,
   montarPedidoDoControle,
   mesmoEndereco,
+  mesmoCabecalho,
+  dispositivoDoControle,
   TOTAL_CENAS,
   cenaDoProgramChange,
   pareceRecallDeCena,

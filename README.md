@@ -83,7 +83,9 @@ No painel da mesa: **DISPLAY ACCESS > MIDI/HOST** (menu MIDI / Setup).
 
 1. **MIDI Port / Host**: `USB` se você usa o cabo USB direto na máquina.
    Se usar uma interface MIDI DIN, escolha `MIDI`.
-2. **Device ID (ou Ch)**: anote o número e deixe fixo.
+2. **Canais Tx e Rx** (MIDI | Setup, linha CHANNEL): anote os dois e deixe
+   fixos. Não precisam ser iguais: o app descobre sozinho em qual a mesa
+   escuta (veja "A mesa não obedece o celular").
 3. **Parameter Change**: ligue **TX** e **RX**.
    - TX é o que faz a calibração funcionar e mantém o app sincronizado quando
      alguém mexe direto na mesa.
@@ -165,9 +167,13 @@ calibrado ficam como estão.
 Eles aparecem como "Canal 2", "Canal 3"... Na primeira vez, mexa no
 "Canal 5" pelo app e confira na mesa se foi o send do canal 5 que andou.
 
-**Se nenhum canal responder**: no menu MIDI/HOST da mesa, ligue o
-**Parameter Change RX** e deixe o **Rx CH** igual ao Device ID. A mesa
-também precisa estar ligada no cabo USB na hora.
+Antes de criar, se o app ainda não sabe em qual canal e porta a mesa escuta,
+ele testa a mesa primeiro (veja "A mesa não obedece o celular") e só cria
+os canais depois de achar.
+
+**Se nenhum canal responder**: toque em **Testar a mesa** nos ajustes e siga
+a lista do que conferir. A mesa também precisa estar ligada no cabo USB na
+hora.
 
 **Se o app disser que o controle não está no formato do manual**: aquele
 canal não serve de modelo. Calibre os canais um a um, como antes.
@@ -213,6 +219,72 @@ exemplo `C0 02` (pela tabela de fábrica, a cena 03). **Veja se o número bate
 com o display da mesa e avise quem cuida do programa se não bater**: a conta
 "mensagem → número da cena" segue o manual, mas ainda não foi conferida numa
 01V96 de verdade.
+
+---
+
+## A mesa não obedece o celular
+
+Sintoma típico: a calibração funciona e a troca de cena aparece no app, mas
+mexer no fader pelo celular não muda nada na mesa, e "criar os outros
+canais" não cria nenhum.
+
+**Por quê.** Na tela **MIDI | Setup**, linha **CHANNEL**, a 01V96 tem dois
+números que parecem iguais mas não são:
+
+- **Tx** é o canal em que a mesa **fala**. A calibração e a troca de cena
+  chegam por ele, por isso elas funcionam.
+- **Rx** é o canal em que a mesa **escuta**. Ela só obedece mensagem que
+  chega com esse número; o resto ela ignora, calada.
+
+Se o Tx e o Rx forem diferentes, ou se a mesa escutar por outra porta USB,
+o app fala e a mesa não ouve. (Manual da 01V96 V2, páginas 218 e 313.)
+
+**O app descobre sozinho.** Ele pergunta para a mesa o valor de um controle
+já calibrado, em cada porta USB da mesa e em cada canal de 1 a 16, e espera
+a resposta. É só pergunta (pedido de leitura): **não muda nada no som**. O
+par que responder (e responder de novo, e ficar calado com outro canal, para
+não confundir com alguém mexendo naquele send na mesa bem na hora) vira o
+caminho do app, guardado no `config.json`, e daí em diante tudo sai por
+ele. O teste roda:
+
+- depois de **calibrar**, sempre que o app ainda não tem caminho confirmado;
+- quando a mesa conecta e o app ainda não tem caminho confirmado para ela;
+- antes de **criar os outros canais**, se ainda não tem caminho;
+- quando você toca em **Testar a mesa**, nos ajustes do app.
+
+O teste leva de menos de um segundo (quando o caminho guardado responde) até
+**uns 20 segundos** (mesa calada, com várias portas USB para varrer).
+Enquanto ele roda, calibrar e criar canais esperam, e o que você mexer no
+fader sai logo depois. Quando acha, o app mostra a porta e o **canal MIDI**
+em que a mesa escuta.
+
+**Se um teste falhar depois de o caminho já ter funcionado** (o Rx foi
+desligado um instante, o AirFader prendeu a porta), o app **não esquece o
+caminho**: os faders continuam saindo por ele, que é o melhor conhecido, e
+o app mostra que ele não foi reconfirmado. Ele pergunta de novo sozinho
+(só pergunta, sem mudar o som) quando a mesa reconecta, depois de calibrar
+e, com a mesa ligada e nada mais rodando, no máximo uma vez por minuto. Se
+nenhuma porta pôde nem ser testada (presa por outro programa), o caminho
+fica como estava.
+
+**Se o teste disser que a mesa não respondeu, confira na mesa:**
+
+1. **MIDI | Setup**: **PARAMETER CHANGE** com **Rx ON** (e Tx ON).
+2. **MIDI | Setup**, linha **CHANNEL**: anote os canais **Tx** e **Rx**. O
+   app testa o Rx sozinho, mas é bom saber quais são.
+3. **DIO/Setup | MIDI/Host**: **GENERAL Rx PORT** e **Tx PORT** em `USB`
+   (a mesma porta USB do cabo). A porta do Studio Manager, em SPECIAL
+   FUNCTIONS, é um ajuste separado: é ela que o AirFader usa.
+4. **AirFader (ou Studio Manager) fechado** neste PC. Aberto, ele pode
+   prender a porta da mesa e o app não consegue usar.
+
+Depois de mudar alguma coisa, toque em **Testar a mesa** de novo.
+
+**O som do fone muda, mas o fader físico da mesa não anda.** Isso é normal:
+o fader físico só mostra o send quando a mesa está no modo daquele Aux
+(botão **AUX** do seu fone aceso, em `AUX SELECT`). Fora desse modo, os
+faders físicos mostram o PA, e o send muda sem nenhum fader se mexer.
+(Manual, página 33.)
 
 ---
 
@@ -308,10 +380,18 @@ calibração pelo celular escreve aqui.
   "servidor": { "porta": 8080, "host": "0.0.0.0" },
   "midi": {
     "entrada": null,
-    "saida": null,
+    "saida": "YAMAHA USB OUT 0-1",
     "intervaloEnvioMs": 25,
     "janelaEcoMs": 400,
-    "esperaRespostaMs": 300
+    "esperaRespostaMs": 300,
+    "esperaTesteMs": 150,
+    "rota": {
+      "saida": "YAMAHA USB OUT 0-1",
+      "entrada": "YAMAHA USB IN 0-1",
+      "dispositivo": 3,
+      "em": "2026-10-11T18:40:02.000Z",
+      "reconfirmada": true
+    }
   },
   "aplicarEstadoAoIniciar": false,
   "controles": [],
@@ -321,7 +401,10 @@ calibração pelo celular escreve aqui.
 
 | Campo | Para que serve |
 |---|---|
-| `midi.entrada` / `midi.saida` | Vazio (`null`) faz ele procurar a mesa sozinho, que é o normal. Aceita índice (`1`) ou parte do nome (`"01V96"`). Dá para escolher pelo app, sem editar isto |
+| `midi.entrada` / `midi.saida` | Vazio (`null`) faz ele procurar a mesa sozinho, que é o normal. Aceita índice (`1`) ou parte do nome (`"01V96"`). Dá para escolher pelo app, sem editar isto. Quando o teste da mesa acha o caminho, ele grava aqui em `saida` o nome exato da porta que a mesa escuta (se esse nome sumir e a mesa aparecer com outro, ele volta a procurar sozinho e testa de novo) |
+| `midi.rota` | Escrito pelo teste da mesa, não edite: `saida` é a porta por onde a mesa aceitou, `entrada` é a porta por onde a resposta chegou (fica aberta junto com a entrada normal, se for outra) e `dispositivo` é o número que vai nas mensagens, de 0 a 15 (canal MIDI = `dispositivo` + 1, o Rx da mesa). `em` é quando foi confirmado. `reconfirmada: false` = o último teste ficou sem resposta, mas o caminho continua valendo e o app testa de novo sozinho. O número da rota só é usado na porta em `saida`; em outra porta (ou com `null`, sem caminho confirmado) o app escreve com o número da calibração até o teste achar o caminho dela |
+| `midi.esperaTesteMs` | No teste da mesa, quanto tempo ele espera a resposta de cada pergunta (padrão 150) |
+| `midi.retestarRotaMs` | Com o caminho não reconfirmado e a mesa ligada, de quanto em quanto tempo, no mínimo, o app pergunta de novo sozinho (padrão 60000, um minuto) |
 | `midi.intervaloEnvioMs` | De quanto em quanto tempo o lote de mudanças vai para a mesa |
 | `midi.janelaEcoMs` | Tempo em que o bridge ignora o que a mesa devolve logo depois de um envio, para o fader não tremer na mão |
 | `midi.intervaloProcuraMs` | De quanto em quanto tempo ele confere se a mesa sumiu ou apareceu no cabo (padrão 10000, dez segundos) |
@@ -348,7 +431,9 @@ Cada controle calibrado fica assim:
 
 `template` é a mensagem inteira capturada da mesa. Em tempo real o bridge copia
 essa mensagem e troca só os bytes a partir de `valueOffset`, com o seu valor
-0..1 esticado entre `rawMin` e `rawMax`.
+0..1 esticado entre `rawMin` e `rawMax`. O terceiro byte (`16` = `10` em
+hexadecimal, o "1n" do manual) leva o canal Tx da mesa; com `midi.rota`, ele
+sai trocado pelo número da rota, que é o canal em que a mesa escuta.
 
 Um canal criado a partir de outro é igual, com o byte do canal trocado e mais
 `"geradoDe": "bumbo"`, para saber de qual modelo ele veio.
@@ -370,13 +455,16 @@ Celular para o bridge:
 { "type": "gerar:canais", "base": "bumbo", "canais": [2, 3, 4, 5] }
 { "type": "config:devolverMix", "ligado": true }
 { "type": "cena:nomear", "numero": 3, "nome": "Louvor" }
+{ "type": "mesa:testar" }
 ```
 
 Bridge para o celular:
 
 ```json
 { "type": "controls", "controls": [ { "id": "bumbo", "label": "Bumbo", "type": "canal", "calibrated": true, "canal": 1 } ] }
-{ "type": "status",   "devolverMix": false, "midi": { "simulado": false, "saida": "01V96" } }
+{ "type": "status",   "devolverMix": false, "midi": { "simulado": false, "saida": "01V96" }, "rota": { "saida": "YAMAHA USB OUT 0-1", "canalMidi": 4, "em": "2026-10-11T18:40:02.000Z", "reconfirmada": true } }
+{ "type": "mesa:teste", "fase": "ok", "rota": { "saida": "YAMAHA USB OUT 0-1", "entrada": "YAMAHA USB IN 0-1", "canalMidi": 4, "reconfirmada": true }, "testados": 4, "motivo": null, "conferir": [] }
+{ "type": "mesa:teste", "fase": "falhou", "rota": { "saida": "YAMAHA USB OUT 0-1", "entrada": "YAMAHA USB IN 0-1", "canalMidi": 4, "reconfirmada": false }, "testados": 32, "motivo": "A mesa nao respondeu em nenhuma porta nem canal MIDI (32 teste(s)).", "conferir": [ "MIDI | SETUP: PARAMETER CHANGE com Rx ON.", "..." ] }
 { "type": "state",    "values": { "bumbo": 0.72 }, "mutes": { "bumbo": false } }
 { "type": "learn:midi", "count": 42, "hex": "F0 43 ..." }
 { "type": "learn:salvo", "control": { }, "faixa": { }, "bytes": { }, "avisos": [ ] }
@@ -404,6 +492,42 @@ lidos e os que ficaram sem resposta. Sem mesa no cabo, a cena é só registrada
 texto) volta como `controle:erro`. Em `/api/status`, o campo `cena` traz
 `numero`, `origem`, `bruto` e `em` para o diagnóstico.
 
+`mesa:teste` vai para **todos** os celulares, porque o teste também roda
+sozinho (calibração sem caminho confirmado, mesa conectando, criar canais
+sem caminho, nova tentativa de um caminho não reconfirmado). `fase` é
+`testando` no começo (e de novo a cada porta USB testada, com `testados`
+atualizado; quem conecta no meio também recebe), depois `ok` ou `falhou`.
+`testados` conta as combinações porta + canal perguntadas.
+`rota.canalMidi` é o canal em que a mesa escuta (1 a 16) e
+`rota.reconfirmada` diz se ela respondeu no último teste. Em `falhou`,
+`rota` é o caminho que continua valendo (`null` se não havia nenhum):
+depois de um teste sem resposta ele vem com `reconfirmada: false`; se
+nenhuma porta pôde ser testada, ou o teste parou porque a mesa saiu do cabo
+ou a porta foi trocada, ele vem como estava e nada é gravado. `motivo` diz o
+que aconteceu e `conferir` traz a lista do que olhar na mesa, em texto
+puro, com os nomes de menu em maiúsculas (vazia quando o teste parou no
+meio). Logo depois de `ok` ou `falhou`, todos recebem o `status`, que traz
+`rota` (`{ saida, canalMidi, em, reconfirmada }`, ou `null` sem caminho). Pedir o teste sem a mesa no cabo, sem nenhum controle
+calibrado ou com outra coisa rodando volta como `controle:erro`. Durante o
+teste, `learn:iniciar` é recusado com `learn:erro` (`"etapa": "nome"`) e
+`gerar:canais` com `gerar:erro`; o `gerar:canais` que disparou o teste
+continua sozinho quando ele acha o caminho (ou volta `gerar:erro` se não
+achar).
+
+Em `/api/status` (o "Copiar diagnóstico"), além do que já existia: `rota`
+(`saida`, `entrada`, `dispositivo`, `canalMidi`, `em`, `reconfirmada` e
+`valeParaSaidaAberta`, ou `null`),
+`midi.entradaResposta` e `midi.entradasVistas`, `ultimosMidi` (as últimas
+40 mensagens MIDI, de entrada e de saída: `em` em ISO, `dir` = `entrada` ou
+`saida`, `porta`, `hex` e `vezes`; só SysEx e Program Change, e a mesma
+mensagem repetida em menos de 1 s na mesma porta, como um fader arrastado,
+vira uma linha só, com a contagem em `vezes` e o `em` da última) e
+`controlesHex` (cada controle calibrado com `id`, `rotulo`, `hex` = o
+`template` em hexadecimal, `offset`, `length`, `rawMin`, `rawMax` e
+`enviaCom`, o começo que sai de verdade, por exemplo `F0 43 13`: o `hex`
+guarda o canal Tx da calibração, e com a rota o terceiro byte sai trocado
+pelo canal em que a mesa escuta). Nada disso é dado pessoal.
+
 O campo `canal` só vem nos controles que servem de modelo para criar os
 outros. `gerar:progresso`, `gerar:fim` e os erros vão só para o celular que
 pediu; logo depois do `gerar:fim`, todos recebem `controls` e `state`
@@ -419,15 +543,20 @@ enquanto os canais estão sendo criados).
 | O app não abre no celular | Celular em outra rede Wi-Fi, ou a máquina do bridge desligou. No Windows, veja se o firewall pediu autorização para o Node.js |
 | "Sem conexão com o bridge" | O programa não está rodando. No Pi: `systemctl status monitor-01v96`. No Windows: rode `node src\bridge.js` na pasta para ver o erro |
 | Durante a calibração, o contador fica em zero | Parameter Change **TX** desligado na mesa, ou porta MIDI errada (`USB` x `MIDI`) |
-| Calibrei mas o fader não muda o som | Parameter Change **RX** desligado na mesa |
-| Ao criar canais de uma vez, nenhum respondeu | Parameter Change **RX** desligado, ou **Rx CH** diferente do Device ID, no menu MIDI/HOST da mesa |
+| Calibrei e a troca de cena aparece, mas o fader do celular não mexe a mesa | A mesa escuta em outro canal (Rx diferente do Tx) ou por outra porta. Toque em **Testar a mesa** nos ajustes: ele acha sozinho. Veja "A mesa não obedece o celular" |
+| **Testar a mesa** diz que a mesa não respondeu | Siga a lista: **PARAMETER CHANGE Rx ON** (MIDI \| Setup), **GENERAL Rx PORT / Tx PORT** em `USB` (DIO/Setup \| MIDI/Host) e **AirFader fechado** no PC. Depois teste de novo |
+| O som do fone muda, mas o fader físico da mesa fica parado | Normal: o fader físico só mostra o send com a mesa no modo daquele Aux (botão **AUX** aceso). Fora dele, os faders mostram o PA |
+| Pedir para calibrar ou criar canais diz "Estou testando a mesa" | O teste da mesa pode levar até uns 20 segundos com a mesa calada. Espere e tente de novo |
+| O app diz que o caminho da mesa "não foi reconfirmado" | O último teste ficou sem resposta, mas o caminho que já funcionou continua valendo. O app tenta de novo sozinho; se os faders não mexem a mesa, siga a lista do que conferir e toque em **Testar a mesa** |
+| Calibrei mas o fader não muda o som | Parameter Change **RX** desligado na mesa. Toque em **Testar a mesa** para conferir |
+| Ao criar canais de uma vez, nenhum respondeu | Parameter Change **RX** desligado na mesa. Toque em **Testar a mesa** e siga a lista do que conferir |
 | Ao criar canais, o app pede para ligar a mesa no cabo | A mesa precisa estar ligada e conectada na hora: é ela que confirma cada canal |
 | O app pede para esperar antes de calibrar ou de criar canais | Calibrar e criar canais não rodam ao mesmo tempo. Espere o outro terminar (ou cancele a calibração aberta) e tente de novo |
 | Ao criar canais, diz que o controle "não está no formato do manual" | Aquele canal não serve de modelo. Calibre os canais um a um |
 | O fader "Canal 5" mexe em outro canal da mesa | Apague os canais criados, calibre um a um e mande o diagnóstico do app para quem cuida do programa |
 | A equipe troca a cena e o app não mostra | `PROGRAM CHANGE` **Tx** desligado (MIDI \| Setup), ou **Tx PORT** diferente de `USB` (DIO/Setup > MIDI/Host) |
 | O número da cena no app não bate com o display da mesa | Tabela Pgm Asgn mudada pela equipe (`INITIALIZE` volta ao padrão de fábrica). Se a tabela é a de fábrica, mande o "Copiar diagnóstico" para quem cuida do programa |
-| A cena aparece, mas os faders não acompanham | Parameter Change **RX** desligado, ou **Rx CH** diferente do Device ID. Controle fora do formato do manual não é relido: calibre de novo |
+| A cena aparece, mas os faders não acompanham | Parameter Change **RX** desligado, ou o app ainda sem caminho confirmado: toque em **Testar a mesa**. Controle fora do formato do manual não é relido: calibre de novo |
 | Os fones mudam toda vez que trocam a cena | Ligue **Recall Safe** nos AUX dos fones |
 | Logo depois de trocar a cena, o app pede para esperar antes de calibrar ou criar canais | Ele está relendo os faders na mesa. Espere uns segundos e tente de novo |
 | Rodapé diz "sem mesa conectada" | Confira o cabo USB e se a mesa está ligada. Se houver mais de um aparelho MIDI, escolha a porta no botão de ajustes do app |

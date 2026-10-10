@@ -348,6 +348,88 @@ test('a resposta da mesa ao pedido e lida pelo molde do proprio controle', () =>
 });
 
 // ---------------------------------------------------------------------------
+// Device number (01V96 V2 p.218 e p.313-315): a mesa manda com o Tx CH e so
+// aceita com o Rx CH. Escrever usa o n da rota; ler ignora o n.
+// ---------------------------------------------------------------------------
+
+test('montarFrame com o n da rota troca so o byte 2 (1n); sem rota, vai o n do molde', () => {
+  const c = bumbo(); // molde capturado com Tx CH = 1 (n = 0)
+  assert.deepEqual(mesa.montarFrame(c, 1, 3), [0xf0, 0x43, 0x13, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0x01, 0x7f, 0xf7]);
+  assert.deepEqual(mesa.montarFrame(c, 1, 15).slice(0, 3), [0xf0, 0x43, 0x1f]);
+  assert.deepEqual(mesa.montarFrame(c, 1, 0), MAXIMO);
+  // Sem rota (null) ou n invalido: comportamento antigo, o n do molde.
+  for (const semRota of [null, undefined, 16, -1, 1.5, '3']) {
+    assert.deepEqual(mesa.montarFrame(c, 1, semRota), MAXIMO, String(semRota));
+  }
+  // O molde guardado nao muda.
+  assert.deepEqual(c.template, MINIMO);
+  // Molde gravado com outro Tx CH (n = 2): a rota manda.
+  const outroTx = comTemplate({ 2: 0x12 });
+  assert.equal(mesa.montarFrame(outroTx, 0, 7)[2], 0x17);
+  assert.equal(mesa.montarFrame(outroTx, 0)[2], 0x12);
+});
+
+test('montarFrame nao mexe no byte 2 de molde que nao e Parameter change da Yamaha', () => {
+  const outroFabricante = { ...bumbo(), template: [0xf0, 0x41, 0x10, 0x42, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+  assert.equal(mesa.montarFrame(outroFabricante, 1, 5)[2], 0x10);
+});
+
+test('montarPedido e montarPedidoDoControle usam o n da rota (3n)', () => {
+  assert.deepEqual(mesa.montarPedido(bumbo(), 2, 3), [0xf0, 0x43, 0x33, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x01, 0xf7]);
+  assert.deepEqual(mesa.montarPedidoDoControle(bumbo(), 9), [0xf0, 0x43, 0x39, 0x3e, 0x0d, 0x01, 0x1c, 0x00, 0x00, 0xf7]);
+  // Sem rota: o n do molde, como antes.
+  assert.deepEqual(mesa.montarPedidoDoControle(bumbo(), null), mesa.montarPedidoDoControle(bumbo()));
+  assert.equal(mesa.montarPedidoDoControle(comTemplate({ 2: 0x1a }), null)[2], 0x3a);
+  assert.equal(mesa.montarPedido(comTemplate({ 2: 0x1a }), 1, 99)[2], 0x3a, 'n invalido nao vale');
+});
+
+test('dispositivoDoControle le o n do molde (o Tx CH de quando foi calibrado)', () => {
+  assert.equal(mesa.dispositivoDoControle(bumbo()), 0);
+  assert.equal(mesa.dispositivoDoControle(comTemplate({ 2: 0x1c })), 12);
+  assert.equal(mesa.dispositivoDoControle(comTemplate({ 1: 0x41 })), null);
+  assert.equal(mesa.dispositivoDoControle(null), null);
+});
+
+test('lerValorDoFrame ignora o n: a mesa manda com Tx CH e responde com Rx CH (ou Tx)', () => {
+  const c = bumbo(); // molde com n = 0
+  for (const n of [0, 1, 3, 15]) {
+    const daMesa = MAXIMO.slice();
+    daMesa[2] = 0x10 | n;
+    assert.equal(mesa.lerValorDoFrame(c, daMesa), 255, 'n = ' + n);
+  }
+  // Molde de um Tx CH, resposta de outro: casa dos dois lados.
+  const resposta = mesa.montarFrame(comTemplate({ 2: 0x15 }), 0.5, 3);
+  assert.equal(mesa.lerValorDoFrame(comTemplate({ 2: 0x15 }), resposta), 128);
+  // Pedido (3n) nao e mudanca de valor, e outro endereco continua de fora.
+  const pedido = MAXIMO.slice();
+  pedido[2] = 0x33;
+  assert.equal(mesa.lerValorDoFrame(c, pedido), null);
+  const outroCanal = MAXIMO.slice();
+  outroCanal[2] = 0x13;
+  outroCanal[8] = 0x01;
+  assert.equal(mesa.lerValorDoFrame(c, outroCanal), null);
+  assert.equal(mesa.lerValorDoFrame(c, null), null);
+});
+
+test('lerValorDoFrame so ignora o n em Parameter change da Yamaha', () => {
+  const generico = { ...bumbo(), template: [0xf0, 0x41, 0x10, 0x42, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf7] };
+  const outroByte2 = generico.template.slice();
+  outroByte2[2] = 0x13;
+  assert.equal(mesa.lerValorDoFrame(generico, outroByte2), null);
+});
+
+test('mesmoEndereco e mesmoCabecalho nao contam o n do device', () => {
+  const base = bumbo();
+  const outroTx = comTemplate({ 2: 0x14 });
+  assert.equal(mesa.mesmoEndereco(base, outroTx), true);
+  assert.equal(mesa.mesmoEndereco(base, comTemplate({ 2: 0x14, 8: 0x01 })), false, 'outro canal');
+  assert.equal(mesa.mesmoEndereco(base, comTemplate({ 2: 0x34 })), false, 'pedido, nao mudanca');
+  assert.equal(mesa.mesmoCabecalho(base.template, outroTx.template), true);
+  assert.equal(mesa.mesmoCabecalho(base.template, comTemplate({ 6: 0x1d }).template), false);
+  assert.equal(mesa.mesmoCabecalho(base.template, null), false);
+});
+
+// ---------------------------------------------------------------------------
 // Cenas: Program Change pela tabela de fabrica e SysEx de funcao SCENE RECALL
 // ---------------------------------------------------------------------------
 

@@ -781,6 +781,42 @@ select.painel__campo {
 
 .bloco__retorno > * { margin-top: 9px; }
 
+/* Erro com mais de um paragrafo (o teste da mesa que falhou): o ritmo vem do
+   gap, nao da margem de cada um. */
+div.painel__erro {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+div.painel__erro > p { margin: 0; }
+
+/* O que conferir na mesa. O texto vem pronto do bridge; os nomes dos menus
+   ficam em destaque, do jeito que aparecem no visor da mesa. */
+.bloco__passos-titulo { color: var(--texto-2); }
+
+.bloco__passos {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--texto-2);
+}
+
+.bloco__passos li { padding-left: 2px; }
+
+.bloco__passos li::marker {
+  color: var(--texto-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.bloco__passos strong {
+  font-weight: 650;
+  color: var(--texto);
+  letter-spacing: 0.01em;
+}
+
 /* ---------------------- lista de controles (ajustes) --------------------- */
 
 .lista {

@@ -72,6 +72,21 @@ const IGNORAR = [/midi through/i, /wavetable/i, /microsoft gs/i];
 // Na duvida, esses nomes tem cara de 01V96.
 const PREFERIDOS = [/01\s*v\s*96/i, /yamaha/i, /usb.*midi/i, /midi.*usb/i];
 
+// Portas que podem ser a mesa, para o teste de rota. No Windows o nome varia
+// com o driver: "Yamaha 01V96-1" ou "YAMAHA USB OUT 0-1" / "YAMAHA USB IN 0-1"
+// (a 01V96 tem USB 1 a 8, cada uma vira uma porta).
+const CANDIDATA = /01\s*v\s*96|yamaha/i;
+
+/** true se o nome tem cara de porta da mesa (e nao e uma das que nunca sao). */
+function ehCandidata(nome) {
+  return typeof nome === 'string' && CANDIDATA.test(nome) && !IGNORAR.some((padrao) => padrao.test(nome));
+}
+
+/** So os nomes que podem ser a mesa, na ordem do sistema e sem repetir. */
+function portasCandidatas(nomes) {
+  return [...new Set((nomes || []).filter(ehCandidata))];
+}
+
 /**
  * Escolhe a porta sozinho, para nao ser preciso configurar nada na maquina da
  * mesa. Descarta as portas que nunca sao a mesa, prefere quem tem nome de
@@ -242,6 +257,8 @@ function mensagemQueServe(mensagem, opcoes = {}) {
  * aoReceber recebe um array de bytes de cada mensagem SysEx e, com
  * opcoes.programChange, tambem de cada Program Change (troca de cena).
  * Sem a opcao (calibracao e monitor pelo terminal), continua so SysEx.
+ * O segundo argumento de aoReceber e o nome da porta por onde a mensagem
+ * chegou (o bridge escuta ate duas entradas e precisa saber qual falou).
  */
 function abrirEntrada(spec, aoReceber, opcoes = {}) {
   const vazia = (motivo) => ({ nome: 'simulado', simulado: true, motivo, sumiu: () => false, fechar() {} });
@@ -250,21 +267,23 @@ function abrirEntrada(spec, aoReceber, opcoes = {}) {
   if (spec === 'simulado') return vazia('modo simulado pedido no config.json');
 
   const porta = new midi.Input();
+  let nomeAberto = null;
 
   try {
     porta.on('message', (_deltaTime, mensagem) => {
       if (!mensagemQueServe(mensagem, opcoes)) return;
       try {
-        aoReceber(Array.from(mensagem));
+        aoReceber(Array.from(mensagem), nomeAberto);
       } catch (erro) {
         console.error('[midi] erro tratando mensagem recebida:', erro.message);
       }
     });
 
     if (spec === 'virtual') {
+      nomeAberto = 'virtual: Monitor 01V96 IN';
       porta.openVirtualPort('Monitor 01V96 IN');
       porta.ignoreTypes(false, true, true); // false = NAO ignorar SysEx
-      return portaEntradaReal(porta, 'virtual: Monitor 01V96 IN', true);
+      return portaEntradaReal(porta, nomeAberto, true);
     }
 
     const nomes = [];
@@ -281,9 +300,10 @@ function abrirEntrada(spec, aoReceber, opcoes = {}) {
       );
     }
 
+    nomeAberto = nomes[indice];
     porta.openPort(indice);
     porta.ignoreTypes(false, true, true);
-    return portaEntradaReal(porta, nomes[indice]);
+    return portaEntradaReal(porta, nomeAberto);
   } catch (erro) {
     try { porta.closePort(); } catch { /* ignora */ }
     return vazia('falha ao abrir a entrada MIDI: ' + erro.message);
@@ -307,6 +327,8 @@ module.exports = {
   mensagemErroMidi,
   listarPortas,
   escolherAutomatica,
+  ehCandidata,
+  portasCandidatas,
   aindaNaLista,
   mensagemQueServe,
   abrirSaida,

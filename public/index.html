@@ -95,6 +95,34 @@
           <h3 class="bloco__titulo">Mesa</h3>
           <p class="bloco__estado" id="mesaEstado">procurando</p>
           <select class="painel__campo" id="mesaPorta" aria-label="Porta da mesa"></select>
+
+          <!-- Caminho ate a mesa: a porta e o canal MIDI em que ela RECEBE (Rx).
+               O bridge descobre so com pedidos de leitura. Pode rodar sozinho
+               (depois da 1a calibracao, quando a mesa conecta) e o resultado
+               chega para todos os celulares: o estado fica aqui, sem modal. -->
+          <div class="bloco__retorno" aria-live="polite">
+            <p class="bloco__texto" id="mesaRota">Caminho até a mesa ainda não conferido.</p>
+            <!-- O bridge recusou comecar agora (relendo a cena, sem molde, ocupado). -->
+            <p class="bloco__estado bloco__estado--alerta" id="mesaRecusa" hidden></p>
+            <div class="painel__erro" id="mesaFalhou" hidden>
+              <p id="mesaMotivo"></p>
+              <p class="bloco__passos-titulo" id="mesaConferirTitulo">Confira na mesa:</p>
+              <ol class="bloco__passos" id="mesaConferir"></ol>
+            </div>
+          </div>
+
+          <div class="medidor" id="mesaTestando" hidden>
+            <span class="medidor__texto medidor__texto--ativo">testando o caminho até a mesa</span>
+            <span class="medidor__detalhe" id="mesaTestados">Pode levar até uns 20 segundos. Só pedidos de leitura: nada muda no som.</span>
+          </div>
+
+          <button class="botao botao--fantasma botao--largo" id="btnTestarMesa" type="button">Testar a mesa</button>
+          <p class="painel__ajuda">
+            Mexer aqui muda o send do seu Aux na hora. O fader físico da mesa só
+            anda junto quando ela está no modo desse Aux (tecla AUX acesa); fora
+            disso ele continua mostrando o PA.
+          </p>
+
           <label class="bloco__opcao">
             <input type="checkbox" id="devolverMix">
             <span>Quando a mesa ligar, devolver o meu mix</span>
@@ -110,18 +138,10 @@
           <p class="bloco__texto" id="gerarExplica"></p>
 
           <div class="bloco__grupo" id="gerarConteudo" hidden>
-            <div class="grade" id="gerarGrade" role="group" aria-label="Canais da mesa"></div>
-
-            <p class="grade__legenda">
-              <span class="grade__existe">já está no seu monitor</span>
-              <span id="gerarContagem">nenhum marcado</span>
-            </p>
-
-            <div class="bloco__atalhos" id="gerarAtalhos">
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-16">1 a 16</button>
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="17-32">17 a 32</button>
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="limpar">Limpar</button>
-            </div>
+            <!-- O caminho principal: tudo de uma vez, sem marcar um por um. -->
+            <button class="botao botao--largo" id="btnPuxarTodos" type="button" aria-describedby="gerarMotivo">
+              Puxar todos os canais da mesa
+            </button>
 
             <div class="medidor" id="gerarProgresso" hidden>
               <span class="medidor__texto medidor__texto--ativo" id="gerarProgressoTexto" aria-live="polite">conferindo com a mesa</span>
@@ -136,7 +156,23 @@
             </div>
 
             <p class="bloco__estado bloco__estado--alerta" id="gerarMotivo" hidden></p>
-            <button class="botao botao--largo" id="btnGerar" type="button" disabled aria-describedby="gerarMotivo">
+
+            <p class="painel__rotulo" id="gerarOuEscolha">Ou escolha os canais</p>
+            <div class="grade" id="gerarGrade" role="group" aria-label="Canais da mesa"></div>
+
+            <p class="grade__legenda">
+              <span class="grade__existe">já está no seu monitor</span>
+              <span id="gerarContagem">nenhum marcado</span>
+            </p>
+
+            <div class="bloco__atalhos" id="gerarAtalhos">
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-16">1 a 16</button>
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="17-32">17 a 32</button>
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-32">Todos</button>
+              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="limpar">Limpar</button>
+            </div>
+
+            <button class="botao botao--fantasma botao--largo" id="btnGerar" type="button" disabled aria-describedby="gerarMotivo">
               Conferir com a mesa e criar
             </button>
             <p class="painel__ajuda">
@@ -203,6 +239,16 @@
 
       <section class="etapa" id="etapaFim" hidden>
         <p class="etapa__ok" id="assResumo"></p>
+
+        <!-- So aparece quando o canal salvo ficou no formato do manual: ele
+             vira o molde dos outros. E oferta, nao obrigacao: Concluir basta. -->
+        <div class="bloco" id="assPuxar" hidden>
+          <h3 class="bloco__titulo">Os outros canais</h3>
+          <p class="bloco__texto" id="assPuxarTexto"></p>
+          <button class="botao botao--fantasma botao--largo" id="assPuxarBotao" type="button">
+            Agora puxar todos os outros canais
+          </button>
+        </div>
       </section>
 
       <p class="painel__erro" id="assErro" hidden></p>

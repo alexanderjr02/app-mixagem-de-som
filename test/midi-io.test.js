@@ -45,6 +45,27 @@ test('na duvida entre aparelhos desconhecidos, nao chuta', () => {
   assert.equal(escolherAutomatica(['Launchpad', 'Minilab']), -1);
 });
 
+test('aceita os nomes do driver USB da Yamaha no Windows ("YAMAHA USB OUT 0-n")', () => {
+  assert.equal(escolherAutomatica(['Microsoft GS Wavetable Synth', 'YAMAHA USB OUT 0-1', 'YAMAHA USB OUT 0-2']), 1);
+  assert.equal(escolherAutomatica(['YAMAHA USB IN 0-1', 'YAMAHA USB IN 0-2']), 0);
+  // Com os dois formatos, continua preferindo o nome 01V96.
+  assert.equal(escolherAutomatica(['YAMAHA USB OUT 0-1', 'Yamaha 01V96-1']), 1);
+});
+
+test('portas candidatas para o teste da mesa: 01V96 ou Yamaha, sem as que nunca sao a mesa', () => {
+  const { portasCandidatas, ehCandidata } = require('../src/midi-io');
+  assert.deepEqual(
+    portasCandidatas(['Microsoft GS Wavetable Synth', 'YAMAHA USB OUT 0-1', 'Launchpad', 'YAMAHA USB OUT 0-2']),
+    ['YAMAHA USB OUT 0-1', 'YAMAHA USB OUT 0-2']
+  );
+  assert.deepEqual(portasCandidatas(['Yamaha 01V96-1', 'Yamaha 01V96-2', 'Yamaha 01V96-1']), ['Yamaha 01V96-1', 'Yamaha 01V96-2']);
+  assert.deepEqual(portasCandidatas(['01V96:01V96 MIDI 1 20:0', 'Midi Through:Midi Through Port-0 14:0']), ['01V96:01V96 MIDI 1 20:0']);
+  assert.deepEqual(portasCandidatas(['USB MIDI Interface', 'Minilab']), []);
+  assert.deepEqual(portasCandidatas(undefined), []);
+  assert.equal(ehCandidata('Microsoft GS Wavetable Synth'), false);
+  assert.equal(ehCandidata(null), false);
+});
+
 test('percebe quando a mesa some da lista (desligada ou cabo solto)', () => {
   assert.equal(aindaNaLista(portaCom(['Microsoft GS Wavetable Synth', 'YAMAHA 01V96']), 'YAMAHA 01V96'), true);
   assert.equal(aindaNaLista(portaCom(['Microsoft GS Wavetable Synth']), 'YAMAHA 01V96'), false);
