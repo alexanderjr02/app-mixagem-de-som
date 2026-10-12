@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Monitor 01V96</title>
 <meta name="description" content="Mixagem do monitor pessoal in-ear na Yamaha 01V96">
-<meta name="theme-color" content="#08080a">
+<meta name="theme-color" content="#0B0C0D">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,82 +13,141 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icone.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icone-192.png">
+<!-- Fontes hospedadas aqui: o Wi-Fi da igreja pode nao ter internet. -->
+<link rel="preload" href="fonts/archivo-narrow.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/barlow-semi-condensed-600.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="styles.css">
 </head>
-<body data-conexao="ligando">
+<body data-conexao="ligando" data-tela="escolha">
 
-  <header class="topo">
-    <div class="marca">
-      <svg class="marca__icone" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M6 3v18M12 3v18M18 3v18" />
-        <rect x="3" y="7" width="6" height="3" rx="1.5" />
-        <rect x="9" y="13" width="6" height="3" rx="1.5" />
-        <rect x="15" y="9" width="6" height="3" rx="1.5" />
-      </svg>
-      <span class="marca__texto">Monitor</span>
-      <span class="marca__sub">01V96</span>
+  <!-- Comando da tela do fone, sem caixas: fone > cena > aviso > abas.
+       Retrato: em cima. Paisagem de celular: o mesmo comando vira um trilho a
+       esquerda e as faixas ganham a altura toda. -->
+  <section class="comando" id="comando" aria-label="Seu fone">
+    <button class="fone" id="foneTrocar" type="button">
+      <span class="legenda">Fone · AUX <span class="n" id="foneAux">1</span></span>
+      <span class="fone__nome"><span id="foneApelido">AUX 1</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg></span>
+    </button>
 
-      <!-- Cena que a equipe de som carregou na mesa. A mesa so diz o numero;
-           o nome vem do app. Sem espaco, encurta para "C3" (o leitor de tela
-           continua lendo "Cena 3"). -->
-      <span class="cena" id="cena" hidden>
-        <span class="cena__numero"><span class="cena__palavra">Cena </span><span class="cena__letra" aria-hidden="true">C</span><span id="cenaNumero"></span></span>
-        <span class="cena__ponto" id="cenaPonto" aria-hidden="true">·</span>
-        <span class="cena__nome" id="cenaNome"></span>
-      </span>
+    <!-- Plano B (controles calibrados) e bridge que nao le a mesa. -->
+    <div class="fone fone--plano" id="comandoPlano" hidden>
+      <span class="legenda" id="planoLegenda">Plano B</span>
+      <span class="fone__nome"><span>Controles calibrados</span></span>
     </div>
 
-    <div class="topo__acoes">
-      <button class="conexao" id="conexao" type="button" aria-label="Situação da conexão">
-        <span class="conexao__ponto" aria-hidden="true"></span>
-        <span class="conexao__texto" id="conexaoTexto">ligando</span>
-      </button>
+    <button class="ajustes" id="btnAjustes" type="button" aria-label="Ajustes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" /></svg>
+      <span>Ajustes</span>
+    </button>
 
-      <button class="icone-botao" id="btnAjustes" type="button" aria-label="Ajustes dos controles">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="12" cy="12" r="3.2" />
-          <path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" />
-        </svg>
-      </button>
+    <!-- Cena que a equipe de som carregou. A mesa so diz o numero; o nome vem do app. -->
+    <p class="cena" id="cena" hidden><span class="cena__rotulo" id="cenaRotulo">Cena <span class="n" id="cenaNumero">00</span><span id="cenaPonto"> · </span><span id="cenaNome"></span></span></p>
+
+    <!-- Aviso passageiro na paisagem (no retrato ele vai para o rodape). -->
+    <p class="passageiro" id="passageiro" hidden></p>
+
+    <!-- Lendo a mesa: na linha das abas, sem empurrar as faixas. -->
+    <div class="aviso aviso--lendo" id="lendo" hidden>
+      <span id="lendoTexto">lendo a mesa</span>
+      <span class="aviso__fio"><i id="lendoFio"></i></span>
     </div>
-  </header>
 
-  <main class="palco">
-    <section class="canais" id="canais" aria-label="Canais do meu fone"></section>
-    <aside class="mestre" id="mestre" aria-label="Volume geral do fone"></aside>
+    <!-- Mesa falhou ou sem conexao. "Pronta" nao ocupa lugar nenhum. -->
+    <div class="aviso aviso--alerta" id="aviso" hidden>
+      <b class="aviso__titulo" id="avisoTitulo"></b>
+      <span class="aviso__longo" id="avisoLongo"></span>
+      <span class="aviso__curto" id="avisoCurto"></span>
+      <button class="aviso__acao" id="avisoAcao" type="button">Ver o que conferir</button>
+    </div>
 
-    <div class="vazio" id="vazio" hidden>
-      <svg class="vazio__arte" viewBox="0 0 48 48" aria-hidden="true">
-        <path d="M12 6v36M24 6v36M36 6v36" />
-        <rect x="6" y="14" width="12" height="6" rx="3" />
-        <rect x="18" y="26" width="12" height="6" rx="3" />
-        <rect x="30" y="19" width="12" height="6" rx="3" />
-      </svg>
-      <p class="vazio__titulo" id="vazioTitulo">Sem conexão com o bridge</p>
-      <p class="vazio__texto" id="vazioTexto">
-        Confira se o programa está rodando na máquina ligada na mesa e se o
-        celular está na mesma rede Wi-Fi.
-      </p>
-      <button class="botao" id="vazioAcao" type="button" hidden>Calibrar o primeiro controle</button>
+    <div class="abas" id="foneFiltro" role="group" aria-label="Quais canais mostrar">
+      <button type="button" data-filtro="com-som" aria-pressed="true" id="abaComSom">Só com som<span class="n" id="abaComSomN"></span></button>
+      <button type="button" data-filtro="todos" aria-pressed="false" id="foneFiltroTodos">Todos<span class="n" id="abaTodosN">32</span></button>
+    </div>
+
+    <button class="botao botao--fantasma comando__voltar" id="legadoVoltar" type="button" hidden>Voltar ao fone</button>
+  </section>
+
+  <main class="palco" id="palco">
+    <!-- O fone escolhido: os canais com os nomes que estao na mesa. -->
+    <div class="mesa" id="fone" hidden>
+      <div class="canais" id="foneCanais" role="group" aria-label="Canais do meu fone">
+        <div class="canais__nenhum" id="foneNenhum" hidden>
+          <p>Nenhum canal com som no seu fone nesta cena.</p>
+          <button class="botao botao--fantasma" id="foneVerTodos" type="button">Mostrar todos</button>
+        </div>
+      </div>
+      <aside class="mestre" id="foneMestre" aria-label="Volume geral do fone"></aside>
+
+      <!-- Ainda sem os canais do fone. -->
+      <div class="espera" id="foneEspera" hidden>
+        <div class="situacao__casa" id="foneSituacao"></div>
+      </div>
+    </div>
+
+    <!-- Plano B: os controles calibrados um a um (Ajustes, Avançado). -->
+    <div class="mesa" id="legado" hidden>
+      <div class="canais" id="canais" role="group" aria-label="Controles calibrados"></div>
+      <aside class="mestre" id="mestre" aria-label="Volume geral"></aside>
+    </div>
+
+    <!-- Bridge que nao le a mesa e nenhum controle calibrado ainda. -->
+    <div class="espera" id="vazio" hidden>
+      <div class="vazio">
+        <p class="vazio__titulo" id="vazioTitulo">Nenhum controle ainda</p>
+        <p class="vazio__texto" id="vazioTexto"></p>
+        <button class="botao" id="vazioAcao" type="button" hidden>Calibrar o primeiro controle</button>
+      </div>
     </div>
   </main>
 
   <footer class="rodape">
-    <span class="rodape__texto" id="rodape">procurando o bridge</span>
-    <!-- Aviso passageiro (troca de cena). Vazio, nao ocupa nada; com texto,
-         toma o lugar do rodape por alguns segundos. -->
+    <span class="rodape__texto" id="rodape"></span>
+    <!-- Aviso passageiro (troca de cena). Com texto, toma o lugar do rodape. -->
     <span class="rodape__aviso" id="rodapeAviso" role="status"></span>
   </footer>
 
-  <!-- Ajustes: a lista de controles do meu fone -->
-  <dialog class="painel" id="ajustes">
+  <!-- Primeira tela: qual Aux vai para o in-ear desta pessoa. -->
+  <section class="escolha" id="escolha" hidden aria-labelledby="escolhaTitulo">
+    <div class="escolha__titulo">
+      <span class="legenda">Monitor 01V96</span>
+      <h1 id="escolhaTitulo" tabindex="-1">Qual é o seu fone?</h1>
+      <p>Escolha o Aux que chega no seu in-ear. A escolha fica salva neste celular.</p>
+    </div>
+
+    <button class="ajustes escolha__engrenagem" id="escolhaAjustes" type="button" aria-label="Ajustes">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" /></svg>
+    </button>
+
+    <div class="escolha__aviso">
+      <div class="aviso aviso--lendo" id="lendoEscolha" hidden>
+        <span id="lendoEscolhaTexto">lendo a mesa</span>
+        <span class="aviso__fio"><i id="lendoEscolhaFio"></i></span>
+      </div>
+      <div class="aviso aviso--alerta" id="avisoEscolha" hidden>
+        <b class="aviso__titulo" id="avisoEscolhaTitulo"></b>
+        <span class="aviso__longo" id="avisoEscolhaLongo"></span>
+        <span class="aviso__curto" id="avisoEscolhaCurto"></span>
+        <button class="aviso__acao" id="avisoEscolhaAcao" type="button">Ver o que conferir</button>
+        <button class="aviso__acao" id="avisoEscolhaCalibrados" type="button" hidden>Usar os controles calibrados</button>
+      </div>
+    </div>
+
+    <div class="grade-fones" id="escolhaGrade" role="group" aria-label="Fones da mesa"></div>
+
+    <div class="escolha__pe">
+      <button class="continuar" id="escolhaVoltar" type="button" hidden></button>
+      <button class="ajustes escolha__ajustes-rotulo" id="escolhaAjustesRotulo" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" /></svg>
+        <span>Ajustes</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- Ajustes: a mesa, a leitura, as cenas, o programa e o plano B -->
+  <dialog class="painel" id="ajustes" aria-labelledby="ajustesTitulo">
     <div class="painel__conteudo painel__conteudo--folha">
-      <h2 class="painel__titulo">Controles do meu fone</h2>
-      <p class="painel__ajuda">
-        Cada controle é o send de um canal da mesa para o Aux do seu fone.
-        Calibrar é mostrar ao programa qual controle é qual, mexendo nele na
-        mesa uma vez.
-      </p>
+      <h2 class="painel__titulo" id="ajustesTitulo">Ajustes</h2>
 
       <div class="painel__corpo">
         <section class="bloco" id="blocoMesa">
@@ -112,7 +171,7 @@
           </div>
 
           <div class="medidor" id="mesaTestando" hidden>
-            <span class="medidor__texto medidor__texto--ativo">testando o caminho até a mesa</span>
+            <span class="medidor__texto medidor__texto--ativo" id="mesaTestandoTexto">testando</span>
             <span class="medidor__detalhe" id="mesaTestados">Pode levar até uns 20 segundos. Só pedidos de leitura: nada muda no som.</span>
           </div>
 
@@ -129,57 +188,28 @@
           </label>
         </section>
 
-        <ul class="lista" id="listaControles"></ul>
-
-        <!-- Com um canal calibrado no formato do manual, ele vira o molde dos
-             outros. Sem ele, o bloco fica compacto e só diz o que falta. -->
-        <section class="bloco" id="blocoGerar">
-          <h3 class="bloco__titulo">Criar os outros canais</h3>
-          <p class="bloco__texto" id="gerarExplica"></p>
-
-          <div class="bloco__grupo" id="gerarConteudo" hidden>
-            <!-- O caminho principal: tudo de uma vez, sem marcar um por um. -->
-            <button class="botao botao--largo" id="btnPuxarTodos" type="button" aria-describedby="gerarMotivo">
-              Puxar todos os canais da mesa
-            </button>
-
-            <div class="medidor" id="gerarProgresso" hidden>
-              <span class="medidor__texto medidor__texto--ativo" id="gerarProgressoTexto" aria-live="polite">conferindo com a mesa</span>
-              <span class="medidor__barra" id="gerarBarraTrilho" role="progressbar"
-                    aria-label="Conferência com a mesa" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><span id="gerarBarra"></span></span>
-              <span class="medidor__detalhe" id="gerarUltimo"></span>
-            </div>
-
-            <div class="bloco__retorno" aria-live="polite">
-              <p class="bloco__estado" id="gerarResumo" hidden></p>
-              <p class="painel__erro" id="gerarErro" hidden></p>
-            </div>
-
-            <p class="bloco__estado bloco__estado--alerta" id="gerarMotivo" hidden></p>
-
-            <p class="painel__rotulo" id="gerarOuEscolha">Ou escolha os canais</p>
-            <div class="grade" id="gerarGrade" role="group" aria-label="Canais da mesa"></div>
-
-            <p class="grade__legenda">
-              <span class="grade__existe">já está no seu monitor</span>
-              <span id="gerarContagem">nenhum marcado</span>
-            </p>
-
-            <div class="bloco__atalhos" id="gerarAtalhos">
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-16">1 a 16</button>
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="17-32">17 a 32</button>
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-32">Todos</button>
-              <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="limpar">Limpar</button>
-            </div>
-
-            <button class="botao botao--fantasma botao--largo" id="btnGerar" type="button" disabled aria-describedby="gerarMotivo">
-              Conferir com a mesa e criar
-            </button>
-            <p class="painel__ajuda">
-              Os novos aparecem como "Canal 5", "Canal 6" e assim por diante.
-              Toque no nome na lista para renomear.
-            </p>
+        <!-- O bridge le a mesa inteira sozinho (nomes, sends e on de todos os
+             Aux). Aqui da para pedir de novo e ver como foi a ultima. -->
+        <section class="bloco" id="blocoLeitura">
+          <h3 class="bloco__titulo">Leitura da mesa</h3>
+          <p class="bloco__estado" id="leituraEstado">ainda não lida</p>
+          <div class="medidor" id="leituraProgresso" hidden>
+            <span class="medidor__texto medidor__texto--ativo" id="leituraProgressoTexto">lendo a mesa</span>
+            <span class="medidor__barra" id="leituraBarraTrilho" role="progressbar"
+                  aria-label="Leitura da mesa" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><span id="leituraBarra"></span></span>
+            <span class="medidor__detalhe">Só leitura: nada muda no som.</span>
           </div>
+          <div class="bloco__retorno" aria-live="polite">
+            <div class="painel__erro" id="leituraErro" hidden>
+              <p id="leituraMotivo"></p>
+              <p class="bloco__passos-titulo" id="leituraDica">Toque em Testar a mesa, no bloco acima, para conferir o caminho até ela.</p>
+            </div>
+          </div>
+          <button class="botao botao--fantasma botao--largo" id="btnLerMesa" type="button">Ler a mesa de novo</button>
+          <p class="painel__ajuda">
+            O programa lê sozinho os nomes e os níveis de todos os fones. Use
+            este botão se o que aparece no celular não bater com a mesa.
+          </p>
         </section>
 
         <!-- A mesa so manda o numero da cena; o nome vale para todos os celulares. -->
@@ -189,6 +219,102 @@
           <ul class="lista" id="listaCenas" hidden></ul>
         </section>
 
+        <!-- O programa ja se atualiza sozinho com a mesa desligada; isto e para
+             quando pedirem uma versao nova antes disso. -->
+        <section class="bloco" id="blocoAtualizar">
+          <h3 class="bloco__titulo">Programa</h3>
+          <p class="bloco__estado" id="atualizarEstado" hidden></p>
+          <div class="medidor" id="atualizarProgresso" hidden>
+            <span class="medidor__texto medidor__texto--ativo" id="atualizarProgressoTexto">procurando versão nova</span>
+            <span class="medidor__detalhe" id="atualizarDetalhe"></span>
+          </div>
+          <div class="bloco__retorno" aria-live="polite">
+            <p class="painel__erro" id="atualizarErro" hidden></p>
+          </div>
+          <button class="botao botao--fantasma botao--largo" id="btnAtualizar" type="button">Atualizar agora</button>
+          <p class="painel__ajuda">
+            O programa já se atualiza sozinho quando a mesa está desligada e
+            ninguém está conectado. Este botão busca a versão nova agora.
+          </p>
+        </section>
+
+        <!-- Plano B: a calibracao um a um de antes. Fica recolhida. -->
+        <details class="bloco avancado" id="avancado">
+          <summary class="avancado__titulo">
+            <span>Avançado (calibração manual)</span>
+            <svg class="avancado__seta" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </summary>
+
+          <div class="avancado__corpo">
+            <p class="bloco__texto">
+              Plano B, para quando a leitura da mesa não funcionar. Cada
+              controle é o send de um canal da mesa para o Aux do seu fone.
+              Calibrar é mostrar ao programa qual controle é qual, mexendo nele
+              na mesa uma vez.
+            </p>
+
+            <label class="bloco__opcao">
+              <input type="checkbox" id="usarCalibrados">
+              <span>Usar os controles calibrados no palco</span>
+            </label>
+
+            <ul class="lista" id="listaControles"></ul>
+
+            <button class="botao botao--fantasma botao--largo" id="btnAdicionar" type="button">Calibrar um controle novo</button>
+
+            <!-- Com um canal calibrado no formato do manual, ele vira o molde dos
+                 outros. Sem ele, o bloco fica compacto e só diz o que falta. -->
+            <section class="bloco" id="blocoGerar">
+              <h3 class="bloco__titulo">Criar os outros canais</h3>
+              <p class="bloco__texto" id="gerarExplica"></p>
+
+              <div class="bloco__grupo" id="gerarConteudo" hidden>
+                <!-- O caminho principal: tudo de uma vez, sem marcar um por um. -->
+                <button class="botao botao--largo" id="btnPuxarTodos" type="button" aria-describedby="gerarMotivo">
+                  Puxar todos os canais da mesa
+                </button>
+
+                <div class="medidor" id="gerarProgresso" hidden>
+                  <span class="medidor__texto medidor__texto--ativo" id="gerarProgressoTexto" aria-live="polite">conferindo com a mesa</span>
+                  <span class="medidor__barra" id="gerarBarraTrilho" role="progressbar"
+                        aria-label="Conferência com a mesa" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0"><span id="gerarBarra"></span></span>
+                  <span class="medidor__detalhe" id="gerarUltimo"></span>
+                </div>
+
+                <div class="bloco__retorno" aria-live="polite">
+                  <p class="bloco__estado" id="gerarResumo" hidden></p>
+                  <p class="painel__erro" id="gerarErro" hidden></p>
+                </div>
+
+                <p class="bloco__estado bloco__estado--alerta" id="gerarMotivo" hidden></p>
+
+                <p class="painel__rotulo" id="gerarOuEscolha">Ou escolha os canais</p>
+                <div class="grade" id="gerarGrade" role="group" aria-label="Canais da mesa"></div>
+
+                <p class="grade__legenda">
+                  <span class="grade__existe">já está no seu monitor</span>
+                  <span id="gerarContagem">nenhum marcado</span>
+                </p>
+
+                <div class="bloco__atalhos" id="gerarAtalhos">
+                  <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-16">1 a 16</button>
+                  <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="17-32">17 a 32</button>
+                  <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="1-32">Todos</button>
+                  <button class="botao botao--pequeno botao--fantasma" type="button" data-faixa="limpar">Limpar</button>
+                </div>
+
+                <button class="botao botao--fantasma botao--largo" id="btnGerar" type="button" disabled aria-describedby="gerarMotivo">
+                  Conferir com a mesa e criar
+                </button>
+                <p class="painel__ajuda">
+                  Os novos aparecem como "Canal 5", "Canal 6" e assim por diante.
+                  Toque no nome na lista para renomear.
+                </p>
+              </div>
+            </section>
+          </div>
+        </details>
+
         <button class="botao botao--fantasma botao--largo" id="btnDiagnostico" type="button">
           Copiar diagnóstico
         </button>
@@ -196,11 +322,14 @@
           Copia o estado do programa para você colar numa conversa quando
           precisar de ajuda.
         </p>
+
+        <button class="botao botao--fantasma botao--largo" id="btnEndereco" type="button">
+          Endereço do programa
+        </button>
       </div>
 
       <div class="painel__acoes">
         <button class="botao botao--fantasma" id="btnFecharAjustes" type="button">Fechar</button>
-        <button class="botao" id="btnAdicionar" type="button">Adicionar controle</button>
       </div>
     </div>
   </dialog>
@@ -267,7 +396,7 @@
 
       <p class="painel__linha" id="painelInfo">-</p>
 
-      <label class="painel__rotulo" for="painelEndereco">Endereço do bridge</label>
+      <label class="painel__rotulo" for="painelEndereco">Endereço do programa</label>
       <input class="painel__campo" id="painelEndereco" type="text" inputmode="url"
              placeholder="ws://monitor.local:8080" autocomplete="off" spellcheck="false">
       <p class="painel__ajuda">
@@ -282,24 +411,59 @@
     </form>
   </dialog>
 
+  <!-- Faixa de fader: numero e nome em cima (o polegar vem de baixo), janela
+       do valor, trilho com fenda, marcas e tampa, e a tecla MUDO na base. -->
   <template id="moldeFader">
-    <div class="fader">
-      <div class="fader__valor"><span data-valor>0</span></div>
+    <div class="faixa">
+      <div class="faixa__cabeca">
+        <span class="faixa__num n" data-num></span>
+        <span class="faixa__nome" data-rotulo></span>
+      </div>
+      <span class="faixa__valor n" data-valor aria-hidden="true">0</span>
 
-      <div class="fader__trilho" data-trilho role="slider" tabindex="0"
+      <div class="faixa__trilho" data-trilho role="slider" tabindex="0"
            aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <span class="fader__marca" style="bottom:25%"></span>
-        <span class="fader__marca" style="bottom:50%"></span>
-        <span class="fader__marca" style="bottom:75%"></span>
-        <div class="fader__nivel" data-nivel></div>
-        <div class="fader__punho" data-punho>
-          <span class="fader__risco"></span>
-          <span class="fader__risco"></span>
+        <div class="faixa__curso">
+          <i class="marca marca--forte" style="bottom:0%"></i>
+          <i class="marca" style="bottom:10%"></i>
+          <i class="marca" style="bottom:20%"></i>
+          <i class="marca" style="bottom:30%"></i>
+          <i class="marca" style="bottom:40%"></i>
+          <i class="marca marca--forte" style="bottom:50%"></i>
+          <i class="marca" style="bottom:60%"></i>
+          <i class="marca" style="bottom:70%"></i>
+          <i class="marca" style="bottom:80%"></i>
+          <i class="marca" style="bottom:90%"></i>
+          <i class="marca marca--forte" style="bottom:100%"></i>
+          <i class="faixa__fenda"></i>
+          <i class="faixa__nivel"></i>
+          <!-- Onde o fader estava quando o dedo encostou: da para voltar ao ponto exato. -->
+          <span class="faixa__antes" data-antes hidden><span class="n" data-antes-valor></span></span>
+        </div>
+        <div class="faixa__pista">
+          <i class="faixa__tampa" data-punho></i>
+          <span class="faixa__etiqueta n" data-etiqueta aria-hidden="true" hidden></span>
         </div>
       </div>
 
-      <button class="fader__mudo" type="button" data-mudo aria-pressed="false">mudo</button>
-      <div class="fader__rotulo" data-rotulo>-</div>
+      <span class="faixa__pe" data-pe hidden></span>
+      <button class="faixa__mudo" type="button" data-mudo aria-pressed="false">Mudo</button>
+    </div>
+  </template>
+
+  <!-- O fone ainda sem canais: lendo, esperando, falhou ou sem resposta. -->
+  <template id="moldeSituacao">
+    <div class="situacao">
+      <p class="situacao__texto" data-texto></p>
+      <div class="aviso aviso--alerta" data-erro>
+        <b class="aviso__titulo" data-titulo></b>
+        <span data-motivo></span>
+        <div class="situacao__acoes">
+          <button class="aviso__acao" type="button" data-acao="tentar">Tentar de novo</button>
+          <button class="aviso__acao" type="button" data-acao="ajustes">Ver o que conferir</button>
+        </div>
+      </div>
+      <button class="aviso__acao" type="button" data-acao="calibrados">Usar os controles calibrados</button>
     </div>
   </template>
 

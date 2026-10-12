@@ -9,7 +9,7 @@
  */
 
 // Suba a versao a cada mudanca no app: o celular troca a copia guardada.
-const CACHE = 'monitor-01v96-v4';
+const CACHE = 'monitor-01v96-v6';
 
 const ARQUIVOS = [
   './',
@@ -19,7 +19,11 @@ const ARQUIVOS = [
   'manifest.webmanifest',
   'icone.svg',
   'icone-192.png',
-  'icone-512.png'
+  'icone-512.png',
+  // Fontes: o Wi-Fi da igreja pode nao ter internet.
+  'fonts/archivo-narrow.woff2',
+  'fonts/barlow-semi-condensed-600.woff2',
+  'fonts/barlow-semi-condensed-700.woff2'
 ];
 
 self.addEventListener('install', (evento) => {

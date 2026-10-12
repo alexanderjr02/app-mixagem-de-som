@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
-    "test": "node --test",
+    "test": "node scripts/testes.js",
+    "test:rapido": "node --test",
+    "test:completo": "node scripts/testes.js --completa",
     "learn": "node src/learn.js",
     "monitor": "node src/monitor.js",
     "portas": "node src/portas.js",

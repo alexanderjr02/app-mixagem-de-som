@@ -15,18 +15,25 @@
  *   6. testa por qual porta e com qual canal MIDI (o Rx CH da mesa) ela aceita
  *      o que o bridge manda, so com pedidos de leitura, e passa a escrever
  *      por essa rota
+ *   7. modo mapa: le da mesa (so com pedidos de leitura) os sends dos 32
+ *      canais para os 8 Aux, os masters e os nomes, usando o mapa de
+ *      enderecos da 01V96 (src/mapa01v96.js, do kryops/remote-mixer, MIT),
+ *      e deixa cada celular escolher o proprio fone sem calibrar nada
+ *   8. dispara a atualizacao pedida pelo app (atualizar:agora)
  *
  * Seguranca de audio: o bridge so envia SysEx de controles marcados como
- * "calibrado": true no config.json. Enquanto voce nao calibrar, mexer nos
- * faders so muda a tela, nunca a mesa. Assim nao tem risco de mandar um
- * endereco chutado e bagunçar a mixagem da igreja. Ao criar canais, o que
- * vai para a mesa e so pedido de leitura (Parameter request), que nao muda
- * o som; o canal so vira controle se a mesa responder.
+ * "calibrado": true no config.json, ou (modo mapa) de enderecos do mapa que
+ * a mesa confirmou respondendo a um pedido de leitura, e so pela rota que o
+ * teste da mesa conferiu. Endereco que nao respondeu nunca e escrito. Assim
+ * nao tem risco de mandar um endereco chutado e baguncar a mixagem da
+ * igreja. Ao criar canais e ao ler a mesa, o que vai para ela e so pedido de
+ * leitura (Parameter request), que nao muda o som.
  */
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 let WebSocketServer;
 try {
@@ -41,6 +48,7 @@ const {
   abrirSaida, abrirEntrada, listarPortas, portasCandidatas, midiDisponivel, mensagemErroMidi
 } = require('./midi-io');
 const mesa = require('./yamaha01v96');
+const mapa = require('./mapa01v96');
 
 const DIR_PUBLIC = path.join(configArquivo.RAIZ, 'public');
 
@@ -301,12 +309,15 @@ function procurarMesa() {
     interromperGeracao('a mesa sumiu no meio');
     interromperReleitura('a mesa sumiu no meio');
     interromperDescoberta('A mesa saiu do cabo no meio do teste. Nada foi gravado.');
+    interromperSincronia('A mesa saiu do cabo no meio da leitura.');
+    perderMapa('a mesa saiu do cabo');
     reabrirPortas();
     contarMidi(false);
     transmitirStatus();
     if (!saidaMidi.simulado) {
       reaplicarMix();
       pedirDescoberta('conexao');
+      pedirSincronia('conexao');
     }
     return;
   }
@@ -347,7 +358,10 @@ function procurarMesa() {
   contarMidi(false);
   transmitirStatus();
   reaplicarMix();
+  // Sem rota conferida nesta saida, testa a mesa (e le depois que achar);
+  // com rota, le a mesa ja.
   pedirDescoberta('conexao');
+  pedirSincronia('conexao');
 }
 
 /** Com a mesa de volta, o mix que esta na tela vale mais que o da mesa. */
@@ -381,21 +395,80 @@ function despacharFila() {
   // canal MIDI que a mesa aceita. Durante o teste nao sai Parameter change.
   if (descoberta) return;
   const dispositivo = dispositivoDaRota();
+  // Lendo a mesa (leitura do mapa, releitura de cena ou criacao de canais): o
+  // que o celular mexeu no mapa espera na fila e sai logo depois, com o
+  // ultimo valor. Assim uma resposta de leitura nunca cruza com o envio.
+  const segurarMapa = Boolean(sincronia || releitura || geracao);
+  // No maximo MAX_QUADROS_POR_CICLO por vez: o resto fica na fila (continua
+  // juntando o ultimo valor de cada um) e sai no ciclo seguinte, sem enxurrada.
+  let saidos = 0;
   for (const [id, valor] of pendentes) {
+    if (saidos >= MAX_QUADROS_POR_CICLO) break;
+    // Endereco do mapa (send, On ou master de um fone): mesma fila, mesmo lote.
+    if (id.startsWith(PREFIXO_MAPA)) {
+      if (segurarMapa) continue; // fica na fila
+      pendentes.delete(id);
+      if (enviarDoMapa(id.slice(PREFIXO_MAPA.length), valor)) saidos++;
+      continue;
+    }
+    pendentes.delete(id);
     const controle = porId.get(id);
     if (!controle) continue;
     if (!mesa.estaCalibrado(controle)) continue; // protecao: nunca chutar bytes
     try {
       enviarMidi(saidaMidi, mesa.montarFrame(controle, valor, dispositivo));
       ultimoEnvio.set(id, Date.now());
+      saidos++;
     } catch (erro) {
       console.error('[midi] falha ao montar quadro de "' + id + '": ' + erro.message);
     }
   }
-  pendentes.clear();
 }
 
+const MAX_QUADROS_POR_CICLO = 32;
+
 setInterval(despacharFila, Math.max(5, cfg.midi.intervaloEnvioMs || 25)).unref();
+
+// Na fila, os enderecos do mapa levam este prefixo (id de controle calibrado
+// so tem a-z, 0-9 e "-", entao nunca colide).
+const PREFIXO_MAPA = 'mapa:';
+
+/**
+ * Manda um valor do mapa para a mesa. Confere tudo de novo na hora de sair:
+ * rota conferida, endereco confirmado pela mesa e o valor dentro da escala
+ * atual (255 em LOW, 1023 em HIGH). Qualquer duvida: nao manda. Devolve
+ * true se o quadro saiu.
+ */
+function enviarDoMapa(chave, valor) {
+  const item = mapa.ESPELHO_POR_CHAVE.get(chave);
+  if (!item || !mapa.ehGravavel(item.campo)) return false;
+  if (!podeEscreverNoMapa(chave)) {
+    console.warn('[mapa] nao mandei ' + chave + ': rota ou endereco sem confirmacao da mesa');
+    return false;
+  }
+  let dados;
+  if (mapa.ehFader(item.campo)) {
+    const maximo = maximoDaEscala();
+    const raw = mapa.rawDoFader(valor, maximo);
+    if (raw > maximo) return false; // protecao: nunca acima do maximo da escala atual
+    dados = mapa.dadosDoFader(raw);
+  } else {
+    dados = mapa.dadosDoOn(valor === true);
+  }
+  try {
+    enviarMidi(saidaMidi, mapa.montarMudanca(item.tipo, item.canal, dados, rota.dispositivo));
+    ultimoEnvioMapa.set(chave, Date.now());
+    return true;
+  } catch (erro) {
+    console.error('[mapa] falha ao montar quadro de ' + chave + ': ' + erro.message);
+    return false;
+  }
+}
+
+/** Escrever num endereco do mapa: mesa no cabo, rota conferida e endereco que respondeu na leitura. */
+function podeEscreverNoMapa(chave) {
+  return modoMapa() && !semMesa() && rotaVerificada() && espelho.confirmados.has(chave);
+}
 
 // ---------------------------------------------------------------------------
 // Caixa preta MIDI: as ultimas mensagens que entraram e sairam, com a porta,
@@ -488,19 +561,26 @@ function aoReceberDaMesa(bytes, porta) {
     }
   }
 
+  // Resposta a um pedido da leitura da mesa (modo mapa), casada pelo endereco.
+  if (sincronia && tomarRespostaDaSincronia(sincronia, bytes)) return;
+
   // Resposta que chegou depois do tempo de espera: nunca cai na calibracao
   // nem no pedido seguinte. Se for de um controle, vale como o valor dele.
   if (tirarAtrasada(bytes)) {
     acompanharMesa(bytes);
+    acompanharMapa(bytes, true);
     return;
   }
 
   if (sessoes.size) {
     for (const [cliente, sessao] of sessoes) alimentarSessao(cliente, sessao, bytes);
+    // Quem calibra mexe de verdade na mesa: o espelho do mapa acompanha.
+    acompanharMapa(bytes);
     return;
   }
 
   acompanharMesa(bytes);
+  acompanharMapa(bytes);
 }
 
 /** Alguem mexeu num controle calibrado direto na mesa: o app acompanha. */
@@ -581,6 +661,15 @@ function iniciarSessao(cliente, msg) {
     enviarPara(cliente, {
       type: 'learn:erro',
       message: 'Estou testando a mesa agora (pode levar ate uns 20 segundos). Espere terminar para calibrar.',
+      etapa: 'nome'
+    });
+    return;
+  }
+  // Nem enquanto le a mesa (modo mapa): as respostas cairiam na calibracao.
+  if (sincronia) {
+    enviarPara(cliente, {
+      type: 'learn:erro',
+      message: 'Estou lendo a mesa agora. Espere uns segundos para calibrar.',
       etapa: 'nome'
     });
     return;
@@ -721,6 +810,8 @@ function statusAtual() {
 
 function transmitirStatus() {
   transmitir(statusAtual());
+  // "pronta" depende da mesa no cabo e da rota conferida, que mudam junto.
+  transmitirResumo();
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +909,10 @@ function iniciarGeracao(cliente, msg, jaTestou = false) {
   // Releitura da cena usa a mesma entrada para as respostas: uma coisa por vez.
   if (releitura) {
     return recusarGeracao(cliente, 'Estou relendo a mesa depois da troca de cena. Espere uns segundos e tente de novo.');
+  }
+  // A leitura da mesa (modo mapa) tambem.
+  if (sincronia) {
+    return recusarGeracao(cliente, 'Estou lendo a mesa agora. Espere uns segundos e tente de novo.');
   }
   // Calibrar e criar canais nunca rodam juntos: uma resposta atrasada da mesa
   // cairia na calibracao e o controle ficaria com o endereco de outro canal.
@@ -1027,9 +1122,23 @@ function concluirGeracao(g) {
  */
 const atrasadas = [];
 
+function prazoDaQuarentena() {
+  return Date.now() + Math.max(2000, 4 * esperaResposta());
+}
+
 function lembrarAtrasada(candidato) {
-  atrasadas.push({ candidato, ate: Date.now() + Math.max(2000, 4 * esperaResposta()) });
+  atrasadas.push({ candidato, ate: prazoDaQuarentena() });
   if (atrasadas.length > 64) atrasadas.shift();
+}
+
+// Enderecos do mapa que ficaram sem resposta na leitura: podem ser ate mais
+// de mil, entao ficam num mapa proprio (chave -> { ate, vezes }), sem limite
+// de 64. "vezes" e quantos pedidos sairam (com a segunda tentativa, ate 2
+// respostas atrasadas do mesmo endereco).
+const atrasadasDoMapa = new Map();
+
+function lembrarAtrasadaDoMapa(chave, vezes = 1) {
+  atrasadasDoMapa.set(chave, { ate: prazoDaQuarentena(), vezes: Math.max(1, vezes) });
 }
 
 /** true se o quadro e resposta atrasada de algum pedido (e tira da lista). */
@@ -1037,6 +1146,17 @@ function tirarAtrasada(bytes) {
   const agora = Date.now();
   for (let i = atrasadas.length - 1; i >= 0; i--) {
     if (atrasadas[i].ate < agora) atrasadas.splice(i, 1);
+  }
+  if (atrasadasDoMapa.size) {
+    const id = mapa.identificar(bytes);
+    const chave = id && !id.pedido ? mapa.chave(id.tipo, id.canal) : null;
+    const espera = chave !== null ? atrasadasDoMapa.get(chave) : undefined;
+    if (espera !== undefined && espera.ate >= agora) {
+      if (--espera.vezes <= 0) atrasadasDoMapa.delete(chave);
+      console.log('[midi] resposta atrasada da mesa: ' + mesa.paraHex(bytes));
+      return true;
+    }
+    for (const [c, e] of atrasadasDoMapa) if (e.ate < agora) atrasadasDoMapa.delete(c);
   }
   const i = atrasadas.findIndex((a) => mesa.lerValorDoFrame(a.candidato, bytes) !== null);
   if (i < 0) return false;
@@ -1164,8 +1284,10 @@ function agendarReleitura(numero) {
     console.log('[cena] sem mesa no cabo: so registrei a cena, nada para reler');
     return;
   }
-  // Troca nova no meio da releitura: o que ela leu ja nao e a cena atual.
+  // Troca nova no meio da releitura (ou da leitura do mapa): o que ela leu ja
+  // nao e a cena atual.
   interromperReleitura('a mesa trocou de cena de novo');
+  interromperSincronia(null);
   armarReleitura(numero);
 }
 
@@ -1174,9 +1296,23 @@ function armarReleitura(numero) {
   clearTimeout(timerReleitura);
   timerReleitura = setTimeout(() => {
     timerReleitura = null;
-    comecarReleitura(numero);
+    lerDepoisDaCena(numero);
   }, esperaCena());
   timerReleitura.unref();
+}
+
+/**
+ * Modo mapa com rota conferida: a leitura da mesa inteira (que tambem rele
+ * os controles calibrados) substitui a releitura. Sem isso, a releitura de
+ * sempre, so dos calibrados.
+ */
+function lerDepoisDaCena(numero) {
+  if (modoMapa() && rotaVerificada()) {
+    releituraPendente = null;
+    pedirSincronia('cena', numero);
+    return;
+  }
+  comecarReleitura(numero);
 }
 
 function interromperReleitura(motivo) {
@@ -1189,8 +1325,8 @@ function interromperReleitura(motivo) {
 /** Calibracao, criacao de canais ou teste acabou: se alguma cena esperava releitura, vai agora. */
 function tentarReleituraPendente() {
   if (releituraPendente === null || timerReleitura) return;
-  if (geracao || sessoes.size || releitura || descoberta) return;
-  comecarReleitura(releituraPendente);
+  if (geracao || sessoes.size || releitura || descoberta || sincronia) return;
+  lerDepoisDaCena(releituraPendente);
 }
 
 function comecarReleitura(numero) {
@@ -1199,13 +1335,13 @@ function comecarReleitura(numero) {
     console.log('[cena] a mesa saiu do cabo antes de reler a cena ' + numero);
     return;
   }
-  // Releitura, teste da mesa, criacao de canais e calibracao nunca rodam
-  // juntos: todos leem as mesmas entradas, e uma resposta atrasada cairia no
-  // fluxo errado.
-  if (geracao || sessoes.size || releitura || descoberta) {
+  // Releitura, teste da mesa, criacao de canais, leitura do mapa e
+  // calibracao nunca rodam juntos: todos leem as mesmas entradas, e uma
+  // resposta atrasada cairia no fluxo errado.
+  if (geracao || sessoes.size || releitura || descoberta || sincronia) {
     releituraPendente = numero;
     const quem = descoberta ? 'o teste da mesa' : geracao ? 'a criacao de canais'
-      : sessoes.size ? 'a calibracao' : 'a releitura anterior';
+      : sessoes.size ? 'a calibracao' : sincronia ? 'a leitura da mesa' : 'a releitura anterior';
     console.log('[cena] a releitura da cena ' + numero + ' espera ' + quem + ' terminar');
     return;
   }
@@ -1378,10 +1514,15 @@ function esperaTeste() {
   return Number.isFinite(ms) && ms > 0 ? Math.min(2000, Math.max(20, ms)) : 150;
 }
 
-/** Molde do teste: o primeiro controle que da para pedir no formato do manual. */
+/**
+ * Molde do teste: o primeiro controle que da para pedir no formato do
+ * manual. Sem nenhum (modo mapa), o send do canal 1 para o Aux 1, pelo mapa:
+ * o teste da mesa funciona sem calibrar nada.
+ */
 function acharMolde() {
   const c = controles.find((x) => mesa.montarPedidoDoControle(x) !== null);
-  return c ? { ...c, template: c.template.slice() } : null;
+  if (c) return { ...c, template: c.template.slice() };
+  return modoMapa() ? mapa.moldeDoTipo(mapa.TESTE_DE_ROTA.tipo, mapa.TESTE_DE_ROTA.canal) : null;
 }
 
 /** A rota vale para a saida aberta e respondeu no ultimo teste? Senao, falta testar. */
@@ -1402,7 +1543,7 @@ function intervaloReconfirmar() {
  */
 function tentarReconfirmarRota() {
   if (!rota || rota.reconfirmada || !rotaValeParaSaida()) return;
-  if (descoberta || geracao || releitura || sessoes.size || timerReleitura) return;
+  if (descoberta || geracao || releitura || sincronia || sessoes.size || timerReleitura) return;
   if (Date.now() - fimDoUltimoTeste < intervaloReconfirmar()) return;
   pedirDescoberta('reconfirmar');
 }
@@ -1447,21 +1588,25 @@ function mensagemTeste(fase, d, extra = {}) {
  */
 function pedirDescoberta(origem) {
   if (semMesa() || rotaVerificada() || !acharMolde()) return;
-  if (descoberta || geracao || releitura || sessoes.size) {
+  if (descoberta || geracao || releitura || sincronia || sessoes.size) {
     descobertaPendente = origem;
     return;
   }
   iniciarDescoberta(origem);
 }
 
-/** Algo exclusivo terminou: roda o que esperava a vez, primeiro o teste da mesa. */
+/**
+ * Algo exclusivo terminou: roda o que esperava a vez, primeiro o teste da
+ * mesa, depois a releitura da cena e por fim a leitura do mapa.
+ */
 function tentarPendentes() {
-  if (descobertaPendente !== null && !descoberta && !geracao && !releitura && !sessoes.size) {
+  if (descobertaPendente !== null && !descoberta && !geracao && !releitura && !sincronia && !sessoes.size) {
     const origem = descobertaPendente;
     descobertaPendente = null;
     pedirDescoberta(origem);
   }
   tentarReleituraPendente();
+  tentarSincroniaPendente();
 }
 
 /** Botao "Testar a mesa" do app. */
@@ -1472,6 +1617,7 @@ function testarMesaPeloApp(cliente) {
   else if (descoberta) motivo = 'Ja estou testando a mesa (leva ate uns 20 segundos); espere terminar.';
   else if (geracao) motivo = 'Estou criando canais agora; teste de novo quando terminar.';
   else if (releitura) motivo = 'Estou relendo a mesa depois da troca de cena; teste de novo em alguns segundos.';
+  else if (sincronia) motivo = 'Estou lendo a mesa agora; teste de novo em alguns segundos.';
   else if (sessoes.size) motivo = 'Alguem esta calibrando um controle agora; teste de novo quando terminar.';
   if (motivo) {
     enviarPara(cliente, { type: 'controle:erro', message: motivo });
@@ -1529,6 +1675,9 @@ function iniciarDescoberta(origem, depois = null) {
           console.error('[mesa] erro depois do teste: ' + erro.message);
         }
       }
+      // Rota conferida: le a mesa (modo mapa). Se algo pegou a vez (a
+      // criacao de canais que pediu o teste), a leitura espera ela acabar.
+      if (resultado.achou) pedirSincronia('rota');
       tentarPendentes();
     });
 }
@@ -1734,6 +1883,786 @@ function concluirDescoberta(d) {
 }
 
 // ---------------------------------------------------------------------------
+// Modo mapa: espelho da mesa e leitura (sincronia)
+// ---------------------------------------------------------------------------
+
+/**
+ * O bridge guarda um espelho da mesa: o valor cru de cada endereco do mapa
+ * que interessa aos fones (mapa.ESPELHO), quais a mesa confirmou respondendo
+ * a um pedido de leitura e a resolucao do fader. Quem manda e a mesa: o
+ * espelho vem da leitura e de quem mexe nela; o celular so escreve num
+ * endereco confirmado, pela rota conferida.
+ */
+const espelho = {
+  valores: new Map(), // chave -> inteiro cru (fader, 0/1, codigo do caractere)
+  confirmados: new Set(), // chaves que responderam na ultima leitura
+  pronta: false,
+  resolucao: null, // 'baixa' | 'alta' | null (nunca leu)
+  resolucaoCrua: null,
+  motivoResolucao: null,
+  lidos: 0,
+  total: 0,
+  semResposta: [],
+  sincronizadaEm: null
+};
+const ultimoEnvioMapa = new Map(); // chave -> quando saiu (para ignorar eco)
+const mexidoNoMapa = new Map(); // chave -> quando um celular mexeu (vale mais que leitura velha)
+
+let sincronia = null;
+let sincroniaPendente = null; // { motivo, numero } esperando a vez
+
+function modoMapa() {
+  return cfg.midi.mapa !== false;
+}
+
+function maximoDaEscala() {
+  return espelho.resolucao === 'alta' ? mapa.FADER_MAX : 255;
+}
+
+/**
+ * HIGH (1023) se algum fader lido passou de 255 (impossivel em LOW) ou se a
+ * leitura de Fader Resolution bate com o valor cru que alguem conferiu na
+ * mesa (midi.resolucaoAltaCrua; nenhum manual documenta, entao por padrao
+ * nao ha). Fora isso, LOW: mandar valor de HIGH para uma mesa em LOW pode
+ * levar o fone ao maximo.
+ */
+function decidirResolucao(crua, acima255) {
+  if (acima255) return { resolucao: 'alta', motivo: 'valor lido acima de 255' };
+  const alta = cfg.midi.resolucaoAltaCrua;
+  if (Number.isInteger(alta) && crua === alta) return { resolucao: 'alta', motivo: 'leitura da mesa (Fader Resolution = ' + crua + ')' };
+  return { resolucao: 'baixa', motivo: 'nenhum valor acima de 255' + (crua === null ? '' : ' (Fader Resolution cru = ' + crua + ')') };
+}
+
+/** Valor cru do fader -> 0..1 na escala atual. */
+function normalizado(raw) {
+  if (!Number.isInteger(raw)) return null;
+  return Math.min(1, Math.max(0, raw / maximoDaEscala()));
+}
+
+function valorDoEspelho(chave) {
+  const v = espelho.valores.get(chave);
+  return Number.isInteger(v) ? v : null;
+}
+
+function nomeDoEspelho(campo, numero, fallback) {
+  const letras = [];
+  let algum = false;
+  for (let l = 1; l <= mapa.LETRAS_DO_NOME; l++) {
+    const tipo = campo === 'nomeAux' ? mapa.TIPO.nomeAux(l) : mapa.TIPO.nomeCanal(l);
+    const v = valorDoEspelho(mapa.chave(tipo, numero));
+    if (v !== null) algum = true;
+    letras.push(mapa.caractereDoCodigo(v));
+  }
+  const nome = algum ? letras.join('').trim() : '';
+  return nome || fallback;
+}
+
+const nomeDoAux = (aux) => nomeDoEspelho('nomeAux', aux, 'Aux ' + aux);
+const nomeDoCanal = (canal) => nomeDoEspelho('nomeCanal', canal, 'Canal ' + canal);
+
+function mensagemResumo() {
+  const auxes = [];
+  for (let aux = 1; aux <= mapa.TOTAL_AUX; aux++) auxes.push({ aux, nome: nomeDoAux(aux) });
+  return {
+    type: 'mesa:resumo',
+    pronta: modoMapa() && espelho.pronta && !semMesa() && rotaVerificada(),
+    auxes,
+    resolucao: espelho.resolucao,
+    sincronizadaEm: espelho.sincronizadaEm
+  };
+}
+
+function transmitirResumo() {
+  transmitir(mensagemResumo());
+}
+
+function chaveDe(campo, aux, canal) {
+  if (campo === 'valor') return mapa.chave(mapa.TIPO.send(aux), canal);
+  if (campo === 'on') return mapa.chave(mapa.TIPO.sendOn(aux), canal);
+  if (campo === 'master') return mapa.chave(mapa.TIPO.master, aux);
+  return mapa.chave(mapa.TIPO.masterOn, aux);
+}
+
+function onDoEspelho(chave) {
+  const v = valorDoEspelho(chave);
+  return v === null ? null : v !== 0;
+}
+
+function mensagemEstadoDoFone(aux) {
+  const canais = [];
+  for (let canal = 1; canal <= mapa.TOTAL_CANAIS; canal++) {
+    const kValor = chaveDe('valor', aux, canal);
+    const kOn = chaveDe('on', aux, canal);
+    canais.push({
+      canal,
+      nome: nomeDoCanal(canal),
+      valor: normalizado(valorDoEspelho(kValor)),
+      on: onDoEspelho(kOn),
+      confirmado: espelho.confirmados.has(kValor) && espelho.confirmados.has(kOn)
+    });
+  }
+  return {
+    type: 'fone:estado',
+    aux,
+    nome: nomeDoAux(aux),
+    master: {
+      valor: normalizado(valorDoEspelho(chaveDe('master', aux))),
+      on: onDoEspelho(chaveDe('masterOn', aux))
+    },
+    canais
+  };
+}
+
+/** Manda so para os celulares que escolheram esse Aux. */
+function transmitirParaAux(aux, objeto, exceto = null) {
+  const texto = JSON.stringify(objeto);
+  for (const cliente of wss.clients) {
+    if (cliente === exceto || cliente.aux !== aux) continue;
+    if (cliente.readyState === cliente.OPEN) cliente.send(texto);
+  }
+}
+
+function transmitirEstadosDosFones() {
+  const escolhidos = new Set();
+  for (const cliente of wss.clients) if (cliente.aux) escolhidos.add(cliente.aux);
+  for (const aux of escolhidos) transmitirParaAux(aux, mensagemEstadoDoFone(aux));
+}
+
+/** A mesa saiu (cabo, porta trocada): nada do espelho vale para escrever ate ler de novo. */
+function perderMapa(motivo) {
+  if (!espelho.pronta && !espelho.confirmados.size) return;
+  espelho.pronta = false;
+  espelho.confirmados.clear();
+  console.log('[mapa] espelho da mesa sem confirmacao: ' + motivo);
+  transmitirResumo();
+}
+
+// Nomes chegam da mesa uma letra por mensagem: junta tudo antes de avisar.
+const nomesMudados = new Set();
+let timerNomes = null;
+
+function avisarNomes() {
+  timerNomes = null;
+  let auxMudou = false;
+  for (const k of nomesMudados) {
+    const [campo, numero] = k.split(':');
+    const n = Number(numero);
+    if (campo === 'nomeCanal') {
+      // O nome do canal vale para todos os fones: cada celular recebe com o
+      // Aux que escolheu (null se ainda nao escolheu).
+      const nome = nomeDoCanal(n);
+      for (const cliente of wss.clients) {
+        enviarPara(cliente, { type: 'fone:mudou', aux: cliente.aux || null, canal: n, campo: 'nome', valor: nome });
+      }
+    } else {
+      auxMudou = true;
+      transmitirParaAux(n, { type: 'fone:mudou', aux: n, canal: null, campo: 'nome', valor: nomeDoAux(n) });
+    }
+  }
+  nomesMudados.clear();
+  if (auxMudou) transmitirResumo();
+}
+
+/**
+ * Guarda no espelho um valor que veio da mesa. avisar: alguem mexeu na mesa
+ * (os celulares sao avisados agora); sem avisar: e a leitura, que avisa
+ * tudo de uma vez no fim.
+ */
+function guardarNoEspelho(item, n, avisar) {
+  const antes = espelho.valores.get(item.chave);
+  espelho.valores.set(item.chave, n);
+
+  if (item.campo === 'resolucao') {
+    espelho.resolucaoCrua = n;
+    // Lendo a mesa: a escala e decidida no fim, so com o que veio nela.
+    if (sincronia) {
+      sincronia.resolucaoCrua = n;
+      return;
+    }
+    if (!avisar) return;
+    // Alguem mexeu no ajuste na mesa: decide so com o que se sabe agora (na
+    // duvida, LOW) e le a mesa de novo para juntar prova.
+    const d = decidirResolucao(n, false);
+    if (d.resolucao !== espelho.resolucao) mudarResolucao(d);
+    pedirSincronia('resolucao');
+    return;
+  }
+
+  // Valor acima de 255 so existe em HIGH: muda a escala na hora.
+  if (mapa.ehFader(item.campo) && n > 255 && espelho.resolucao !== 'alta') {
+    if (sincronia) sincronia.acima255 = true;
+    if (avisar) mudarResolucao({ resolucao: 'alta', motivo: 'valor lido acima de 255' });
+    return;
+  }
+  if (!avisar || antes === n) return;
+
+  if (item.campo === 'nomeCanal' || item.campo === 'nomeAux') {
+    nomesMudados.add(item.campo + ':' + (item.campo === 'nomeAux' ? item.aux : item.canalDoFone));
+    if (!timerNomes) {
+      timerNomes = setTimeout(avisarNomes, 150);
+      timerNomes.unref();
+    }
+    return;
+  }
+  const canal = item.campo === 'valor' || item.campo === 'on' ? item.canalDoFone : null;
+  const valor = mapa.ehFader(item.campo) ? normalizado(n) : n !== 0;
+  transmitirParaAux(item.aux, { type: 'fone:mudou', aux: item.aux, canal, campo: item.campo, valor });
+}
+
+function mudarResolucao(d) {
+  const antes = espelho.resolucao;
+  espelho.resolucao = d.resolucao;
+  espelho.motivoResolucao = d.motivo;
+  console.log('[mapa] escala do fader: ' + (d.resolucao === 'alta' ? 'HIGH (1023)' : 'LOW (255)') + ', ' + d.motivo);
+  if (antes !== d.resolucao) {
+    transmitirResumo();
+    transmitirEstadosDosFones();
+  }
+}
+
+/**
+ * Alguem mexeu na mesa (ou chegou resposta atrasada) num endereco do
+ * espelho: atualiza e avisa os celulares daquele Aux. Eco do que o proprio
+ * bridge acabou de mandar e ignorado. true se o quadro era do espelho.
+ */
+function acompanharMapa(bytes, atrasada = false) {
+  if (!modoMapa()) return false;
+  const id = mapa.identificar(bytes);
+  if (!id || id.pedido) return false;
+  const chave = mapa.chave(id.tipo, id.canal);
+  const item = mapa.ESPELHO_POR_CHAVE.get(chave);
+  if (!item) return false;
+  const n = mapa.inteiroDosDados(id.dados);
+  if (n === null || !mapa.valorPlausivel(item.campo, n)) return false;
+  if (Date.now() - (ultimoEnvioMapa.get(chave) || 0) < (cfg.midi.janelaEcoMs || 400)) return true;
+  // Resposta atrasada de Fader Resolution e so a leitura velha, nao alguem
+  // mexendo no ajuste: guarda o numero e nao decide nada.
+  if (atrasada && item.campo === 'resolucao') {
+    espelho.resolucaoCrua = n;
+    return true;
+  }
+  // Resposta atrasada acima de 255 e de uma leitura velha (a mesa pode ter
+  // passado para LOW desde entao): nunca sobe a escala. So movimento AO VIVO
+  // prova HIGH. Ignorada, sem guardar.
+  if (atrasada && mapa.ehFader(item.campo) && n > 255 && espelho.resolucao !== 'alta') return true;
+  guardarNoEspelho(item, n, true);
+  return true;
+}
+
+// --- a leitura -------------------------------------------------------------
+
+function loteSincronia() {
+  const n = Number(cfg.midi.loteSincronia);
+  return Number.isInteger(n) && n > 0 ? Math.min(64, n) : 16;
+}
+
+function pausaSincronia() {
+  const ms = Number(cfg.midi.pausaSincroniaMs);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(1000, ms) : 20;
+}
+
+function mensagemSincronia(fase, s, motivo = null) {
+  return { type: 'mesa:sincronia', fase, lidos: s ? s.lidos : 0, total: s ? s.total : 0, motivo };
+}
+
+/**
+ * Pede a leitura (modo mapa). So com a mesa no cabo e rota conferida; se
+ * algo exclusivo estiver rodando, espera a vez (tentarPendentes).
+ * numero: a cena que disparou (para avisar "cena:relida" dos calibrados).
+ */
+function pedirSincronia(motivo, numero = null) {
+  if (!modoMapa() || semMesa() || !rotaVerificada()) return false;
+  // Com troca de cena a caminho (timerReleitura), outro pedido espera: a da
+  // cena le logo depois e leva o numero dela.
+  if (sincronia || descoberta || geracao || releitura || sessoes.size || (timerReleitura && motivo !== 'cena')) {
+    // Pedido de cena vale mais que outro: ele leva o numero para o fim.
+    if (!sincroniaPendente || motivo === 'cena') sincroniaPendente = { motivo, numero };
+    return true;
+  }
+  comecarSincronia(motivo, numero);
+  return true;
+}
+
+function tentarSincroniaPendente() {
+  if (!sincroniaPendente || timerReleitura) return;
+  if (sincronia || descoberta || geracao || releitura || sessoes.size) return;
+  const { motivo, numero } = sincroniaPendente;
+  sincroniaPendente = null;
+  pedirSincronia(motivo, numero);
+}
+
+/** Para a leitura. motivo null = troca de cena (a leitura nova avisa por ela). */
+function interromperSincronia(motivo) {
+  const s = sincronia;
+  if (!s || s.cancelada) return;
+  s.cancelada = true;
+  s.motivoCancelamento = motivo;
+  console.log('[mapa] leitura interrompida: ' + (motivo || 'a mesa trocou de cena de novo'));
+  if (s.despertar) s.despertar();
+}
+
+function comecarSincronia(motivo, numero) {
+  sincroniaPendente = null;
+  const n = rota.dispositivo;
+  const itens = mapa.ESPELHO.map((item) => ({ ...item, pedido: mapa.montarPedido(item.tipo, item.canal, n), pedidoEm: 0 }));
+  // Os controles calibrados tambem sao relidos (a leitura substitui a releitura).
+  const calibrados = [];
+  for (const c of controles) {
+    const pedido = mesa.montarPedidoDoControle(c, n);
+    if (pedido) calibrados.push({ id: c.id, controle: { ...c, template: c.template.slice() }, pedido, pedidoEm: 0 });
+  }
+  const s = {
+    motivo,
+    numero,
+    itens,
+    calibrados,
+    faltam: new Map(itens.map((i) => [i.chave, i])),
+    calibradosFaltam: new Map(calibrados.map((c) => [c.id, c])),
+    temCalibrados: calibrados.length > 0,
+    lidosCalibrados: [],
+    respondidos: new Set(),
+    lidos: 0,
+    total: itens.length + calibrados.length,
+    acima255: false, // algum fader lido NESTA leitura passou de 255
+    resolucaoCrua: null, // Fader Resolution lido NESTA leitura
+    cancelada: false,
+    motivoCancelamento: null,
+    despertar: null,
+    ateAcabar: false,
+    ultimoAviso: 0,
+    saida: saidaMidi,
+    entrada: entradaMidi
+  };
+  sincronia = s;
+  console.log('[mapa] lendo a mesa (' + motivo + (numero !== null ? ', cena ' + numero : '') + '): ' +
+    s.total + ' endereco(s), em lotes de ' + loteSincronia());
+  transmitir(mensagemSincronia('lendo', s));
+
+  rodarSincronia(s)
+    .catch((erro) => {
+      console.error('[mapa] erro na leitura: ' + erro.message);
+      s.cancelada = true;
+      s.motivoCancelamento = 'Algo deu errado na leitura da mesa.';
+    })
+    .then(() => concluirSincronia(s))
+    .catch((erro) => console.error('[mapa] nao consegui terminar a leitura: ' + erro.message))
+    .finally(() => {
+      if (sincronia === s) sincronia = null;
+      tentarPendentes();
+    });
+}
+
+function faltamNaSincronia(s) {
+  return s.faltam.size + s.calibradosFaltam.size;
+}
+
+/** Espera ms (ou ate faltar nada, com ateAcabar), acordando se a leitura parar. */
+function esperarNaSincronia(s, ms, ateAcabar = false) {
+  return new Promise((ok) => {
+    const timer = setTimeout(fim, ms);
+    function fim() {
+      clearTimeout(timer);
+      if (s.despertar === fim) {
+        s.despertar = null;
+        s.ateAcabar = false;
+      }
+      ok();
+    }
+    s.despertar = fim;
+    s.ateAcabar = ateAcabar;
+  });
+}
+
+/**
+ * Pede tudo em lotes pequenos, com pausa entre eles (a mesa perde respostas
+ * se recebe tudo de uma vez), e casa cada resposta pelo endereco. O que nao
+ * respondeu e pedido mais uma vez. Daqui so sai Parameter request.
+ */
+async function rodarSincronia(s) {
+  const lote = loteSincronia();
+  const pausa = pausaSincronia();
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const fila = [...s.faltam.values(), ...s.calibradosFaltam.values()];
+    if (!fila.length) return;
+    if (tentativa === 2) console.log('[mapa] ' + fila.length + ' endereco(s) sem resposta: pergunto de novo, uma vez');
+    const enviados = new Set();
+    for (let i = 0; i < fila.length; i += lote) {
+      if (s.cancelada) return;
+      if (mesaSaiuDoAr(s)) {
+        interromperSincronia('A mesa saiu do ar no meio da leitura.');
+        return;
+      }
+      for (const item of fila.slice(i, i + lote)) {
+        if (item.chave ? !s.faltam.has(item.chave) : !s.calibradosFaltam.has(item.id)) continue;
+        item.pedidoEm = Date.now();
+        const hex = item.pedido.join(',');
+        if (enviados.has(hex)) continue; // calibrado no mesmo endereco de um item do mapa
+        enviados.add(hex);
+        item.enviados = (item.enviados || 0) + 1;
+        // Protecao: daqui so sai pedido de leitura (byte 2 = 3n), nunca Parameter change.
+        if ((item.pedido[2] & 0xf0) !== 0x30) throw new Error('pedido de leitura sem 3n');
+        enviarMidi(s.saida, item.pedido);
+      }
+      await esperarNaSincronia(s, pausa);
+      if (Date.now() - s.ultimoAviso >= 250) {
+        s.ultimoAviso = Date.now();
+        transmitir(mensagemSincronia('lendo', s));
+      }
+    }
+    if (s.cancelada) return;
+    if (faltamNaSincronia(s)) await esperarNaSincronia(s, esperaResposta(), true);
+  }
+}
+
+/** Resposta a um pedido da leitura? Guarda o valor e confirma o endereco. */
+function tomarRespostaDaSincronia(s, bytes) {
+  // Leitura parada (cena nova, mesa saiu): nada mais e dela.
+  if (s.cancelada) return false;
+  let tomou = false;
+  const id = mapa.identificar(bytes);
+  if (id && !id.pedido) {
+    const chave = mapa.chave(id.tipo, id.canal);
+    const item = s.faltam.get(chave);
+    const n = item ? mapa.inteiroDosDados(id.dados) : null;
+    // So confirma valor que faz sentido para o campo (On: 0 ou 1, fader: ate 1023...).
+    if (item && n !== null && mapa.valorPlausivel(item.campo, n)) {
+      s.faltam.delete(chave);
+      s.respondidos.add(chave);
+      espelho.confirmados.add(chave);
+      s.lidos++;
+      if (mapa.ehFader(item.campo) && n > 255) s.acima255 = true;
+      // O celular mexeu (ou o bridge mandou) depois do pedido: esse valor ja
+      // vale mais que a leitura, que e de antes.
+      const mexido = mexidoNoMapa.get(chave) || 0;
+      const enviado = ultimoEnvioMapa.get(chave) || 0;
+      if (!pendentes.has(PREFIXO_MAPA + chave) && mexido < item.pedidoEm && enviado < item.pedidoEm) {
+        guardarNoEspelho(item, n, false);
+      }
+      tomou = true;
+    }
+  }
+  for (const [cid, item] of s.calibradosFaltam) {
+    const raw = mesa.lerValorDoFrame(item.controle, bytes);
+    if (raw === null) continue;
+    s.calibradosFaltam.delete(cid);
+    s.lidosCalibrados.push(cid);
+    s.lidos++;
+    aplicarReleitura(cid, raw, item.pedidoEm);
+    tomou = true;
+  }
+  if (tomou && s.ateAcabar && !faltamNaSincronia(s) && s.despertar) s.despertar();
+  return tomou;
+}
+
+function concluirSincronia(s) {
+  // O que ficou sem resposta pode responder depois: de quarentena, para nunca
+  // cair na calibracao nem em outro fluxo.
+  // Conta cada pedido ainda em aberto: o endereco que so respondeu na segunda
+  // tentativa ainda pode mandar a resposta da primeira.
+  for (const item of s.itens) {
+    const abertos = (item.enviados || 0) - (s.respondidos.has(item.chave) ? 1 : 0);
+    if (abertos > 0) lembrarAtrasadaDoMapa(item.chave, abertos);
+  }
+  for (const item of s.calibrados) {
+    const abertos = (item.enviados || 0) - (s.lidosCalibrados.includes(item.id) ? 1 : 0);
+    for (let i = 0; i < abertos; i++) lembrarAtrasada(item.controle);
+  }
+
+  // Os calibrados relidos vao pelo "state" de sempre.
+  const values = {};
+  const mutes = {};
+  for (const id of s.lidosCalibrados) {
+    if (!porId.has(id)) continue;
+    values[id] = estado.valores[id];
+    mutes[id] = estado.mutes[id];
+  }
+  if (Object.keys(values).length) {
+    transmitir({ type: 'state', values, mutes });
+    agendarSalvamento();
+  }
+
+  const semResposta = [...s.faltam.keys(), ...[...s.calibradosFaltam.keys()].map((id) => 'controle:' + id)];
+  console.log('[mapa] leitura: ' + s.lidos + ' de ' + s.total + ' lido(s), ' + semResposta.length + ' sem resposta' +
+    (s.cancelada ? ', interrompida' : ''));
+
+  if (s.cancelada) {
+    if (s.motivoCancelamento) {
+      espelho.pronta = false;
+      transmitir(mensagemSincronia('falhou', s, s.motivoCancelamento));
+      transmitirResumo();
+    }
+    return; // troca de cena: a leitura nova avisa por ela
+  }
+
+  espelho.confirmados = new Set(s.respondidos);
+  espelho.lidos = s.lidos;
+  espelho.total = s.total;
+  espelho.semResposta = semResposta;
+  // Escala so com o que ESTA leitura trouxe: um fader velho acima de 255, de
+  // um endereco que agora nao respondeu, nunca segura HIGH numa mesa que
+  // passou para LOW. Na duvida, LOW.
+  espelho.resolucaoCrua = s.resolucaoCrua;
+  const d = decidirResolucao(s.resolucaoCrua, s.acima255);
+  espelho.resolucao = d.resolucao;
+  espelho.motivoResolucao = d.motivo;
+  console.log('[mapa] escala do fader: ' + (d.resolucao === 'alta' ? 'HIGH (1023)' : 'LOW (255)') + ', ' + d.motivo);
+  // O que nao respondeu agora deixa de valer no espelho: fica desconhecido.
+  for (const chave of s.faltam.keys()) espelho.valores.delete(chave);
+
+  let motivo = null;
+  if (!s.lidos) {
+    espelho.pronta = false;
+    motivo = 'A mesa nao respondeu a nenhum pedido de leitura. Toque em "Testar a mesa" e confira MIDI | SETUP na mesa.';
+    console.warn('[mapa] a mesa nao respondeu a leitura');
+  } else {
+    espelho.pronta = true;
+    espelho.sincronizadaEm = new Date().toISOString();
+    // So conta o que o app mexe (send, On, master e calibrados), nao letra de nome.
+    const gravaveis = s.itens.filter((i) => mapa.ehGravavel(i.campo)).length + s.calibrados.length;
+    const gravaveisSemResposta = [...s.faltam.values()].filter((i) => mapa.ehGravavel(i.campo)).length +
+      s.calibradosFaltam.size;
+    if (gravaveisSemResposta) {
+      motivo = gravaveisSemResposta + ' de ' + gravaveis + ' controle(s) sem resposta: esses nao sao mexidos pelo app.';
+    }
+  }
+
+  transmitirResumo();
+  transmitirEstadosDosFones();
+  transmitir(mensagemSincronia(s.lidos ? 'pronta' : 'falhou', s, motivo));
+  if (s.numero !== null && s.temCalibrados) {
+    transmitir({
+      type: 'cena:relida',
+      numero: s.numero,
+      lidos: s.lidosCalibrados.slice(),
+      semResposta: [...s.calibradosFaltam.keys()]
+    });
+  }
+}
+
+// --- o que o celular pede ---------------------------------------------------
+
+function ehAux(n) {
+  return Number.isInteger(n) && n >= 1 && n <= mapa.TOTAL_AUX;
+}
+
+function erroDoMapa(cliente, message) {
+  enviarPara(cliente, { type: 'controle:erro', message });
+}
+
+const MAPA_DESLIGADO = 'O modo mapa esta desligado neste PC ("mapa": false em midi, no config.json).';
+
+/** fone:escolher: o celular passa a acompanhar esse Aux e recebe o estado dele. */
+function escolherFone(cliente, msg) {
+  if (!modoMapa()) return erroDoMapa(cliente, MAPA_DESLIGADO);
+  if (!ehAux(msg.aux)) return erroDoMapa(cliente, 'Escolha um fone de Aux 1 a Aux 8.');
+  cliente.aux = msg.aux;
+  enviarPara(cliente, mensagemEstadoDoFone(msg.aux));
+}
+
+/**
+ * fone:send / fone:sendOn / fone:master / fone:masterOn. So vai para a mesa
+ * se podeEscreverNoMapa deixar (rota conferida e endereco confirmado); o
+ * resto do motivo e so para explicar a recusa.
+ */
+function mexerNoFone(cliente, msg, campo) {
+  if (!modoMapa()) return erroDoMapa(cliente, MAPA_DESLIGADO);
+  if (!ehAux(msg.aux)) return erroDoMapa(cliente, 'Escolha um fone de Aux 1 a Aux 8.');
+  const comCanal = campo === 'valor' || campo === 'on';
+  if (comCanal && !(Number.isInteger(msg.canal) && msg.canal >= 1 && msg.canal <= mapa.TOTAL_CANAIS)) {
+    return erroDoMapa(cliente, 'Canal invalido: vai de 1 a ' + mapa.TOTAL_CANAIS + '.');
+  }
+  let valor;
+  if (mapa.ehFader(campo)) {
+    if (typeof msg.valor !== 'number' || !Number.isFinite(msg.valor)) return erroDoMapa(cliente, 'Valor invalido: mande um numero de 0 a 1.');
+    valor = mesa.limitar01(msg.valor);
+  } else {
+    if (typeof msg.on !== 'boolean') return erroDoMapa(cliente, 'Mande "on" como true ou false.');
+    valor = msg.on;
+  }
+
+  const chave = chaveDe(campo, msg.aux, msg.canal);
+  if (!podeEscreverNoMapa(chave)) {
+    let motivo;
+    if (semMesa()) motivo = 'Ligue a mesa no cabo USB: nada foi mandado.';
+    else if (!rotaVerificada()) motivo = 'A mesa ainda nao confirmou o caminho (toque em "Testar a mesa"): nada foi mandado.';
+    else motivo = 'A mesa nao confirmou esse controle na ultima leitura: nada foi mandado.';
+    return erroDoMapa(cliente, motivo);
+  }
+
+  const raw = mapa.ehFader(campo) ? mapa.rawDoFader(valor, maximoDaEscala()) : (valor ? 1 : 0);
+  espelho.valores.set(chave, raw);
+  mexidoNoMapa.set(chave, Date.now());
+  pendentes.set(PREFIXO_MAPA + chave, valor);
+  transmitirParaAux(msg.aux, {
+    type: 'fone:mudou',
+    aux: msg.aux,
+    canal: comCanal ? msg.canal : null,
+    campo,
+    valor: mapa.ehFader(campo) ? normalizado(raw) : valor
+  }, cliente);
+}
+
+/** mesa:sincronizar: le a mesa de novo agora. */
+function sincronizarPeloApp(cliente) {
+  let motivo = null;
+  if (!modoMapa()) motivo = MAPA_DESLIGADO;
+  else if (semMesa()) motivo = 'Ligue a mesa no cabo USB: a leitura precisa que ela responda.';
+  else if (!rotaVerificada()) motivo = 'Ainda nao sei por qual caminho a mesa responde: toque em "Testar a mesa".';
+  else if (sincronia) motivo = 'Ja estou lendo a mesa; espere terminar.';
+  else if (descoberta) motivo = 'Estou testando a mesa agora; tente de novo em alguns segundos.';
+  else if (geracao) motivo = 'Estou criando canais agora; tente de novo quando terminar.';
+  else if (releitura) motivo = 'Estou relendo a mesa depois da troca de cena; tente de novo em alguns segundos.';
+  else if (sessoes.size) motivo = 'Alguem esta calibrando um controle agora; tente de novo quando terminar.';
+  if (motivo) return erroDoMapa(cliente, motivo);
+  pedirSincronia('app');
+}
+
+// ---------------------------------------------------------------------------
+// Atualizar agora (pedido pelo app)
+// ---------------------------------------------------------------------------
+
+/**
+ * O app pede e confirma: o bridge abre o atualizador (`iniciar.js atualizar
+ * --agora <id>`) fora da sua arvore de processos, do mesmo jeito que a
+ * vigia liga o bridge (o atualizador para este bridge no meio da troca). O
+ * atualizador conta como vai em atualizacao-agora.json; o bridge le e avisa
+ * todos os celulares (atualizar:estado). Depois da troca, o bridge novo le o
+ * mesmo arquivo ao subir e avisa como terminou.
+ */
+const ARQUIVO_AGORA = path.join(configArquivo.DADOS, 'atualizacao-agora.json');
+const FASES_ATUALIZAR = new Set(['verificando', 'baixando', 'testando', 'trocando', 'em-dia', 'falhou']);
+const FASES_FINAIS = new Set(['em-dia', 'falhou']);
+const PRAZO_ATUALIZAR_MS = 20 * 60 * 1000;
+// O atualizador grava a primeira fase em segundos. Sem nenhum sinal dele em
+// 2 min, ele nem abriu: o app fica sabendo, em vez de 20 min "verificando".
+const SINAL_ATUALIZAR_MS = 2 * 60 * 1000;
+let atualizacaoAgora = null; // { id, desde, timer, viuSinal }
+let ultimoAtualizar = null; // { fase, mensagem, em }
+
+/** O bridge roda de uma instalacao (INST\versoes\<sha>, com INST\iniciar.js)? */
+function naInstalacao() {
+  const inst = configArquivo.DADOS;
+  if (!fs.existsSync(path.join(inst, 'iniciar.js'))) return false;
+  const rel = path.relative(path.join(inst, 'versoes'), configArquivo.RAIZ);
+  return Boolean(rel) && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.includes(path.sep);
+}
+
+function avisarAtualizar(fase, mensagem) {
+  ultimoAtualizar = { fase, mensagem, em: Date.now() };
+  console.log('[atualizar] ' + fase + ': ' + mensagem);
+  transmitir({ type: 'atualizar:estado', fase, mensagem });
+}
+
+/** O que o atualizador gravou, conferido campo a campo; null se nao ha. */
+function lerProgressoDaAtualizacao() {
+  try {
+    const j = configArquivo.lerJson(ARQUIVO_AGORA);
+    if (!j || typeof j !== 'object' || !FASES_ATUALIZAR.has(j.fase)) return null;
+    const em = Date.parse(j.em);
+    if (!Number.isFinite(em)) return null;
+    return {
+      id: typeof j.id === 'string' && /^[0-9a-f]{16}$/.test(j.id) ? j.id : null,
+      fase: j.fase,
+      mensagem: typeof j.mensagem === 'string' ? j.mensagem.slice(0, 200) : '',
+      em
+    };
+  } catch {
+    return null;
+  }
+}
+
+function pararDeAcompanharAtualizacao() {
+  if (atualizacaoAgora && atualizacaoAgora.timer) clearInterval(atualizacaoAgora.timer);
+  atualizacaoAgora = null;
+}
+
+function acompanharAtualizacao() {
+  const a = atualizacaoAgora;
+  if (!a) return;
+  const p = lerProgressoDaAtualizacao();
+  if (p && p.id === a.id && p.em >= a.desde - 1000) {
+    a.viuSinal = true;
+    if (!ultimoAtualizar || ultimoAtualizar.fase !== p.fase || ultimoAtualizar.mensagem !== p.mensagem) {
+      avisarAtualizar(p.fase, p.mensagem);
+    }
+    if (FASES_FINAIS.has(p.fase)) {
+      pararDeAcompanharAtualizacao();
+      return;
+    }
+  }
+  if (!a.viuSinal && Date.now() - a.desde > SINAL_ATUALIZAR_MS) {
+    pararDeAcompanharAtualizacao();
+    avisarAtualizar('falhou', 'O atualizador nao abriu (nenhum sinal em 2 minutos). Tente de novo; se repetir, veja o atualizacao.log no PC da mesa.');
+    return;
+  }
+  if (Date.now() - a.desde > PRAZO_ATUALIZAR_MS) {
+    pararDeAcompanharAtualizacao();
+    avisarAtualizar('falhou', 'O atualizador nao deu noticia. Veja o diagnostico (atualizacao.log no PC da mesa).');
+  }
+}
+
+function acompanharAtualizacaoDe(id, desde, viuSinal = false) {
+  pararDeAcompanharAtualizacao();
+  const timer = setInterval(acompanharAtualizacao, 500);
+  timer.unref();
+  atualizacaoAgora = { id, desde, timer, viuSinal };
+}
+
+/** Ao subir: uma atualizacao pedida pelo app ainda em andamento (ou que acabou de terminar). */
+function retomarAtualizacao() {
+  const p = lerProgressoDaAtualizacao();
+  if (!p || Date.now() - p.em > PRAZO_ATUALIZAR_MS) return;
+  ultimoAtualizar = { fase: p.fase, mensagem: p.mensagem, em: p.em };
+  // O proprio arquivo ja e sinal de vida do atualizador.
+  if (!FASES_FINAIS.has(p.fase)) acompanharAtualizacaoDe(p.id, p.em, true);
+}
+
+/** atualizar:agora */
+function atualizarAgora(cliente) {
+  // Acabou de terminar (menos de 10 min): devolve como terminou e nao abre
+  // outra. Toque repetido ou celular que reconectou nao dispara de novo.
+  if (!atualizacaoAgora && ultimoAtualizar && FASES_FINAIS.has(ultimoAtualizar.fase) &&
+    Date.now() - ultimoAtualizar.em < 10 * 60 * 1000) {
+    enviarPara(cliente, { type: 'atualizar:estado', fase: ultimoAtualizar.fase, mensagem: ultimoAtualizar.mensagem });
+    return;
+  }
+  if (!naInstalacao()) {
+    return erroDoMapa(cliente, 'Atualizar pelo app so funciona no PC da mesa, com o programa instalado pelo instalador do Windows.');
+  }
+  if (atualizacaoAgora) {
+    if (ultimoAtualizar) enviarPara(cliente, { type: 'atualizar:estado', fase: ultimoAtualizar.fase, mensagem: ultimoAtualizar.mensagem });
+    return erroDoMapa(cliente, 'Ja estou atualizando; acompanhe por aqui.');
+  }
+  let atualizador;
+  try {
+    atualizador = require('./atualizar');
+  } catch (erro) {
+    // O detalhe (caminho, pilha) fica so no log; o celular recebe texto fixo.
+    console.error('[atualizar] nao carreguei o atualizador: ' + String(erro.message).split('\n')[0].slice(0, 200));
+    return erroDoMapa(cliente, 'Nao consegui abrir o atualizador.');
+  }
+  const id = crypto.randomBytes(8).toString('hex');
+  acompanharAtualizacaoDe(id, Date.now());
+  console.log('[atualizar] pedido pelo app: abrindo o atualizador (--agora ' + id + ')');
+  avisarAtualizar('verificando', 'Procurando versao nova.');
+  Promise.resolve()
+    .then(() => atualizador.lancarAgora(configArquivo.DADOS, id))
+    .then((abriu) => {
+      if (!abriu && atualizacaoAgora && atualizacaoAgora.id === id) {
+        pararDeAcompanharAtualizacao();
+        avisarAtualizar('falhou', 'Nao consegui abrir o atualizador.');
+      }
+    })
+    .catch((erro) => {
+      console.error('[atualizar] erro ao abrir o atualizador: ' + erro.message);
+      if (atualizacaoAgora && atualizacaoAgora.id === id) {
+        pararDeAcompanharAtualizacao();
+        avisarAtualizar('falhou', 'Nao consegui abrir o atualizador.');
+      }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Servidor HTTP (o app em si)
 // ---------------------------------------------------------------------------
 
@@ -1746,6 +2675,7 @@ const TIPOS = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8'
 };
 
@@ -1864,6 +2794,24 @@ const servidor = http.createServer((req, res) => {
         node: process.version,
         ligadoHa: Math.round(process.uptime()) + 's'
       },
+      // Modo mapa: o que a ultima leitura achou. resolucaoCrua e o valor de
+      // Fader Resolution como a mesa mandou (a codificacao nao e documentada:
+      // confira com a tela MIDI | SETUP da mesa). semResposta: os enderecos
+      // que a mesa nao confirmou (no maximo 60 aqui; o total vem a parte).
+      mapa: {
+        ativo: modoMapa(),
+        pronta: mensagemResumo().pronta,
+        resolucao: espelho.resolucao,
+        resolucaoCrua: espelho.resolucaoCrua,
+        motivoResolucao: espelho.motivoResolucao,
+        lidos: espelho.lidos,
+        total: espelho.total,
+        semResposta: espelho.semResposta.slice(0, 60),
+        semRespostaTotal: espelho.semResposta.length,
+        sincronizadaEm: espelho.sincronizadaEm,
+        lendo: sincronia ? { lidos: sincronia.lidos, total: sincronia.total } : null,
+        auxes: mensagemResumo().auxes
+      },
       controles: controles.length,
       naoCalibrados,
       clientes: wss ? wss.clients.size : 0,
@@ -1919,7 +2867,8 @@ const servidor = http.createServer((req, res) => {
 // WebSocket (tempo real)
 // ---------------------------------------------------------------------------
 
-const wss = new WebSocketServer({ server: servidor });
+// Mensagem do app e sempre pequena; 64 KiB e folga de sobra e corta abuso.
+const wss = new WebSocketServer({ server: servidor, maxPayload: 64 * 1024 });
 
 function enviarPara(cliente, objeto) {
   if (cliente.readyState === cliente.OPEN) {
@@ -1949,8 +2898,15 @@ wss.on('connection', (cliente, req) => {
   enviarPara(cliente, statusAtual());
   enviarPara(cliente, { type: 'state', values: estado.valores, mutes: estado.mutes });
   enviarPara(cliente, mensagemCena());
+  // Modo mapa: os fones (Aux) que existem e se a leitura da mesa esta pronta.
+  enviarPara(cliente, mensagemResumo());
   // Chegou no meio de um teste da mesa: fica sabendo que ele esta rodando.
   if (descoberta) enviarPara(cliente, mensagemTeste('testando', descoberta));
+  if (sincronia) enviarPara(cliente, mensagemSincronia('lendo', sincronia));
+  // Reconectou depois de uma atualizacao pedida pelo app: ve como ela acabou.
+  if (ultimoAtualizar && Date.now() - ultimoAtualizar.em < PRAZO_ATUALIZAR_MS) {
+    enviarPara(cliente, { type: 'atualizar:estado', fase: ultimoAtualizar.fase, mensagem: ultimoAtualizar.mensagem });
+  }
 
   cliente.on('message', (dados) => {
     let msg;
@@ -2065,6 +3021,35 @@ wss.on('connection', (cliente, req) => {
         nomearCena(cliente, msg);
         return;
 
+      // Modo mapa: o celular escolhe o proprio fone (Aux 1 a 8) e mexe nele.
+      case 'fone:escolher':
+        escolherFone(cliente, msg);
+        return;
+
+      case 'fone:send':
+        mexerNoFone(cliente, msg, 'valor');
+        return;
+
+      case 'fone:sendOn':
+        mexerNoFone(cliente, msg, 'on');
+        return;
+
+      case 'fone:master':
+        mexerNoFone(cliente, msg, 'master');
+        return;
+
+      case 'fone:masterOn':
+        mexerNoFone(cliente, msg, 'masterOn');
+        return;
+
+      case 'mesa:sincronizar':
+        sincronizarPeloApp(cliente);
+        return;
+
+      case 'atualizar:agora':
+        atualizarAgora(cliente);
+        return;
+
       // Escolher a porta da mesa pelo celular, para nunca precisar editar
       // arquivo na maquina do rack.
       case 'midi:portas': {
@@ -2101,13 +3086,16 @@ wss.on('connection', (cliente, req) => {
         interromperGeracao('a porta da mesa foi trocada');
         interromperReleitura('a porta da mesa foi trocada');
         interromperDescoberta('A porta da mesa foi trocada no meio do teste. Nada foi gravado.');
+        interromperSincronia('A porta da mesa foi trocada no meio da leitura.');
+        perderMapa('a porta da mesa foi trocada');
         reabrirPortas();
 
         console.log('[midi] porta escolhida pelo celular: ' + (escolha || 'automatica'));
         contarMidi(false);
         transmitirStatus();
-        // Porta nova sem rota confirmada: testa a mesa nela.
+        // Porta nova sem rota confirmada: testa a mesa nela (e le depois).
         pedirDescoberta('conexao');
+        pedirSincronia('conexao');
         return;
       }
 
@@ -2214,8 +3202,13 @@ servidor.listen(porta, host, () => {
     console.log('[midi] reaplicando o ultimo mix salvo na mesa');
   }
 
-  // Mesa no cabo sem rota confirmada nesta saida: testa (o mix acima espera o teste).
+  // Mesa no cabo sem rota confirmada nesta saida: testa (o mix acima espera o
+  // teste). Com rota conferida, le a mesa ja (modo mapa).
   pedirDescoberta('conexao');
+  pedirSincronia('conexao');
+
+  // Subiu no meio (ou no fim) de uma atualizacao pedida pelo app.
+  retomarAtualizacao();
 });
 
 /** IPs da maquina, para voce saber o que digitar no celular. */

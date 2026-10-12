@@ -72,7 +72,19 @@ const PADRAO = {
     retestarRotaMs: 60000,
     // Rota que a mesa confirmou: { saida, entrada, dispositivo, em }. Quem
     // escreve e o proprio bridge, depois do teste da mesa.
-    rota: null
+    rota: null,
+    // Modo mapa: le e escreve os sends dos fones pelos enderecos do mapa da
+    // 01V96 (src/mapa01v96.js), sem calibrar. false volta ao comportamento
+    // antigo (so controles calibrados).
+    mapa: true,
+    // Leitura da mesa: quantos pedidos por lote e a pausa entre os lotes
+    // (mandar tudo de uma vez faz a mesa responder so parte).
+    loteSincronia: 16,
+    pausaSincroniaMs: 20,
+    // Valor cru de "Fader Resolution" que quer dizer HIGH. Nenhum manual
+    // documenta: enquanto ninguem conferir na mesa, fica null e so um valor
+    // lido acima de 255 prova HIGH (na duvida, LOW).
+    resolucaoAltaCrua: null
   },
   aplicarEstadoAoIniciar: false,
   controles: []

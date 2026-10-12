@@ -80,15 +80,18 @@ async function conectarCelular(porta) {
   const ws = new WebSocket('ws://127.0.0.1:' + porta);
   const recebidas = [];
   const todas = []; // tudo que chegou, na ordem, para conferir sequencia
+  const tempos = []; // quando cada uma de "todas" chegou
   ws.on('message', (dados) => {
     const msg = JSON.parse(dados.toString());
     recebidas.push(msg);
     todas.push(msg);
+    tempos.push(Date.now());
   });
   await new Promise((ok, erro) => { ws.once('open', ok); ws.once('error', erro); });
 
   return {
     todas,
+    tempos,
     enviar: (objeto) => ws.send(JSON.stringify(objeto)),
     /** Tira da fila a primeira mensagem desse tipo que passe no filtro. */
     receber(tipo, filtro = () => true, ms) {
@@ -108,7 +111,7 @@ async function conectarCelular(porta) {
  * Sobe um bridge numa pasta de dados temporaria, com o config dado.
  * "antes" sao argumentos extras do node (usado para trocar o pacote MIDI).
  */
-async function subirBridge({ config, estado, antes = [], env = {} }) {
+async function subirBridge({ config, estado, antes = [], env = {}, arquivos = {} }) {
   const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'monitor-bridge-'));
   const porta = await portaLivre();
   fs.writeFileSync(path.join(pasta, 'config.json'), JSON.stringify({
@@ -116,6 +119,7 @@ async function subirBridge({ config, estado, antes = [], env = {} }) {
     servidor: { porta, host: '127.0.0.1' }
   }));
   if (estado) fs.writeFileSync(path.join(pasta, 'estado.json'), JSON.stringify(estado));
+  for (const [nome, conteudo] of Object.entries(arquivos)) fs.writeFileSync(path.join(pasta, nome), conteudo);
 
   const filho = spawn(process.execPath, [...antes, path.join(RAIZ, 'src', 'bridge.js')], {
     cwd: RAIZ,
@@ -413,6 +417,94 @@ test('remover um controle tira ele do app e do config.json', async () => {
   assert.deepEqual(gravado.controles.map((c) => c.id), ['bumbo']);
 });
 
+test('modo mapa sem mesa no cabo: o resumo diz que nao esta pronto, o fone mostra nomes padrao e mexer e recusado sem mandar nada', async () => {
+  await pausa(INTERVALO_IMPRESSAO);
+  celularA.esquecer();
+  celularB.esquecer();
+  const desde = bridge.linhas.length;
+  const outro = await conectarCelular(bridge.porta);
+  try {
+    const resumo = await outro.receber('mesa:resumo');
+    assert.deepEqual(resumo, {
+      type: 'mesa:resumo', pronta: false,
+      auxes: Array.from({ length: 8 }, (_, i) => ({ aux: i + 1, nome: 'Aux ' + (i + 1) })),
+      resolucao: null, sincronizadaEm: null
+    });
+    celularA.enviar({ type: 'fone:escolher', aux: 2 });
+    const e2 = await celularA.receber('fone:estado');
+    assert.equal(e2.nome, 'Aux 2');
+    assert.equal(e2.canais.length, 32);
+    assert.ok(e2.canais.every((c) => c.valor === null && c.on === null && c.confirmado === false));
+    celularA.enviar({ type: 'fone:send', aux: 2, canal: 1, valor: 0.7 });
+    assert.match((await celularA.receber('controle:erro')).message, /Ligue a mesa/);
+    celularA.enviar({ type: 'mesa:sincronizar' });
+    assert.match((await celularA.receber('controle:erro')).message, /Ligue a mesa/);
+    await pausa(INTERVALO_IMPRESSAO);
+    assert.deepEqual(enviosDesde(desde), []);
+    assert.equal(celularB.viu('fone:estado'), false, 'o outro celular nao escolheu fone');
+    const s = JSON.parse((await pedir(bridge.porta, 'GET', '/api/status')).texto);
+    assert.equal(s.mapa.ativo, true);
+    assert.equal(s.mapa.pronta, false);
+  } finally {
+    outro.fechar();
+  }
+});
+
+test('mensagem de mais de 64 KiB pelo WebSocket derruba so aquela conexao (1009); os outros celulares seguem', async () => {
+  const ws = new WebSocket('ws://127.0.0.1:' + bridge.porta);
+  ws.on('error', () => { /* o bridge fecha: esperado */ });
+  await new Promise((ok, erro) => { ws.once('open', ok); ws.once('error', erro); });
+  const fechou = new Promise((ok) => ws.once('close', (codigo) => ok(codigo)));
+  ws.send(JSON.stringify({ type: 'ping', lixo: 'x'.repeat(70 * 1024) }));
+  assert.equal(await fechou, 1009);
+  celularA.esquecer();
+  celularA.enviar({ type: 'ping' });
+  await celularA.receber('pong');
+});
+
+test('atualizar:agora fora de uma instalacao do Windows e recusado, so para quem pediu, sem abrir nada', async () => {
+  celularA.esquecer();
+  celularB.esquecer();
+  celularA.enviar({ type: 'atualizar:agora' });
+  assert.match((await celularA.receber('controle:erro')).message, /instalado pelo instalador/);
+  await pausa(100);
+  assert.equal(celularA.viu('atualizar:estado'), false);
+  assert.equal(celularB.viu('controle:erro'), false);
+  assert.equal(bridge.linhas.some((l) => l.includes('[atualizar]')), false);
+});
+
+test('depois da atualizacao pedida pelo app, o bridge que sobe conta aos celulares como ela terminou', async () => {
+  const id = '0123456789abcdef';
+  const progresso = (fase, mensagem) => JSON.stringify({ id, fase, mensagem, em: new Date().toISOString() });
+  const b = await subirBridge({
+    config: { midi: { entrada: 'simulado', saida: 'simulado' }, controles: [] },
+    arquivos: { 'atualizacao-agora.json': progresso('trocando', 'Trocando para a versao 2222222. O app reconecta sozinho.') }
+  });
+  const cel = await conectarCelular(b.porta);
+  try {
+    assert.deepEqual(await cel.receber('atualizar:estado'),
+      { type: 'atualizar:estado', fase: 'trocando', mensagem: 'Trocando para a versao 2222222. O app reconecta sozinho.' });
+    fs.writeFileSync(path.join(b.pasta, 'atualizacao-agora.json'), progresso('em-dia', 'Atualizado para a versao 2222222.'));
+    assert.deepEqual(await cel.receber('atualizar:estado', (x) => x.fase === 'em-dia', 5000),
+      { type: 'atualizar:estado', fase: 'em-dia', mensagem: 'Atualizado para a versao 2222222.' });
+    // Quem conecta depois tambem fica sabendo como terminou.
+    const outro = await conectarCelular(b.porta);
+    assert.equal((await outro.receber('atualizar:estado')).fase, 'em-dia');
+    outro.fechar();
+    // Pedir de novo logo depois (menos de 10 min): devolve o resultado e nao abre nada.
+    cel.esquecer();
+    cel.enviar({ type: 'atualizar:agora' });
+    assert.deepEqual(await cel.receber('atualizar:estado'),
+      { type: 'atualizar:estado', fase: 'em-dia', mensagem: 'Atualizado para a versao 2222222.' });
+    await pausa(150);
+    assert.equal(cel.viu('controle:erro'), false);
+    assert.equal(b.linhas.some((l) => l.includes('[atualizar] pedido pelo app')), false, 'abriu o atualizador de novo');
+  } finally {
+    cel.fechar();
+    await b.parar();
+  }
+});
+
 /** Le o estado.json sem ficar em cima do arquivo (no Windows, ler junto com o rename do bridge o faria falhar). */
 async function esperarEstadoSalvo(pasta, condicao, descricao) {
   const arquivo = path.join(pasta, 'estado.json');
@@ -513,13 +605,24 @@ test('o ultimo mix vai para o estado.json da pasta de dados', async () => {
  * novo da fila "emitir" ([[1, "C0 02"], [2, "F0 43 ..."]]) vai uma vez, em
  * ordem (o arquivo e lido a cada 15 ms). "repetir" ("F0 43 ...") vai a cada
  * 15 ms enquanto estiver no arquivo: alguem mexendo num send sem parar.
+ *
+ * Com "guardar": true, ela lembra cada Parameter change aceito (o valor do
+ * endereco muda de verdade) e responde os pedidos seguintes com ele: assim
+ * da para ver que o que o app mandou ficou na mesa. Sem, nada muda.
  */
 const MESA_FALSA = `
 const Module = require('module');
 const fs = require('fs');
 const ARQUIVO = process.env.MESA_FALSA;
+// Lido uma vez por callback: um lote de pedidos da leitura do mapa (mandado
+// de uma vez, no mesmo callback) le o arquivo uma vez so, e o callback
+// seguinte (outro timer, outra mensagem) ja le de novo e ve o que mudou.
+let mesaDoCallback = null;
 function mesa() {
-  try { return JSON.parse(fs.readFileSync(ARQUIVO, 'utf8')); } catch { return { portas: [], geracao: 0 }; }
+  if (mesaDoCallback) return mesaDoCallback;
+  try { mesaDoCallback = JSON.parse(fs.readFileSync(ARQUIVO, 'utf8')); } catch { mesaDoCallback = { portas: [], geracao: 0 }; }
+  process.nextTick(() => { mesaDoCallback = null; });
+  return mesaDoCallback;
 }
 const nomes = (m, lado) => (Array.isArray(m[lado]) ? m[lado] : m.portas) || [];
 const ehN = (x) => Number.isInteger(x);
@@ -545,9 +648,10 @@ function aceita(m, bytes, porta) {
   if (ehN(m.rxCh) && (bytes[2] & 0x0f) !== m.rxCh) return false;
   return true;
 }
+const memoria = {};
 function responderPedido(m, bytes) {
   const endereco = hex(bytes.slice(4, 9));
-  const porEndereco = (m.enderecos || {})[endereco];
+  const porEndereco = (m.guardar && memoria[endereco]) || (m.enderecos || {})[endereco];
   const valor = Array.isArray(porEndereco) ? porEndereco : (m.respostas || {})[String(bytes[8] + 1)];
   if (!Array.isArray(valor)) return;
   const n = ehN(m.respostaCh) ? m.respostaCh : ehN(m.rxCh) ? m.rxCh : bytes[2] & 0x0f;
@@ -589,6 +693,7 @@ class Porta {
     const ok = aceita(m, bytes, this.aberta);
     console.log('[mesa falsa] ' + (ok ? 'aceitou ' : 'ignorou ') + this.aberta + ' | ' + hex(bytes));
     if (ok && (bytes[2] & 0xf0) === 0x30) responderPedido(m, bytes);
+    if (ok && m.guardar && (bytes[2] & 0xf0) === 0x10 && bytes.length > 10) memoria[hex(bytes.slice(4, 9))] = bytes.slice(9, -1);
   }
 }
 class Entrada extends Porta {
@@ -724,7 +829,7 @@ test('PC ligado direto: a mesa desliga, liga de novo e o bridge volta sozinho', 
   const b = await subirBridge({
     config: {
       midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50, intervaloProcuraMs: 100,
-        rota: rotaConfirmada() },
+        rota: rotaConfirmada(), mapa: false },
       aplicarEstadoAoIniciar: true,
       controles: [bumbo]
     },
@@ -790,7 +895,7 @@ test('criar os outros canais: so nasce controle no canal que a mesa confirmou', 
   const b = await subirBridge({
     config: {
       midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
-        intervaloProcuraMs: 100, esperaRespostaMs: 600, rota: rotaConfirmada() },
+        intervaloProcuraMs: 100, esperaRespostaMs: 600, rota: rotaConfirmada(), mapa: false },
       aplicarEstadoAoIniciar: false,
       controles: [bumbo, caixa, tom, reverb, estranho]
     },
@@ -1026,7 +1131,7 @@ test('troca de cena na mesa: o app mostra a cena e rele os faders so com pedidos
   const b = await subirBridge({
     config: {
       midi: { entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
-        intervaloProcuraMs: 100, esperaRespostaMs: 300, rota: rotaConfirmada() },
+        intervaloProcuraMs: 100, esperaRespostaMs: 300, rota: rotaConfirmada(), mapa: false },
       aplicarEstadoAoIniciar: false,
       controles: [bumbo, caixa, reverb, master, estranho, guitarra]
     },
@@ -1282,9 +1387,11 @@ const USB = {
 };
 const SINTETIZADOR = 'Microsoft GS Wavetable Synth';
 
+// mapa: false = plano B (so controles calibrados), como antes do modo mapa.
+// Os testes do modo mapa ficam no fim do arquivo.
 const midiDeTeste = {
   entrada: null, saida: null, intervaloEnvioMs: 10, janelaEcoMs: 50,
-  intervaloProcuraMs: 100, esperaRespostaMs: 300, esperaTesteMs: 100
+  intervaloProcuraMs: 100, esperaRespostaMs: 300, esperaTesteMs: 100, mapa: false
 };
 
 /** Bumbo calibrado no canal 1, com o molde que a mesa mandou com o n do Tx CH. */
@@ -1892,6 +1999,577 @@ test('rota confirmada que fica sem resposta: continua valendo, nao reconfirmada,
     });
   } finally {
     celular.fechar();
+    await m.parar();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Modo mapa: le e escreve os fones pelos enderecos do mapa da 01V96, sem
+// calibrar. Os enderecos daqui foram escritos a mao, copiados do
+// message-types.ts do kryops/remote-mixer: a mesa de teste nao usa
+// src/mapa01v96.js, entao uma tabela gerada errada derruba o teste.
+// ---------------------------------------------------------------------------
+
+const hx = (n) => n.toString(16).toUpperCase().padStart(2, '0');
+const END = {
+  send: (aux, canal) => '7F 01 23 ' + hx(3 * aux - 1) + ' ' + hx(canal - 1),
+  sendOn: (aux, canal) => '7F 01 23 ' + hx(3 * aux - 3) + ' ' + hx(canal - 1),
+  master: (aux) => '7F 01 39 00 ' + hx(aux - 1),
+  masterOn: (aux) => '7F 01 36 00 ' + hx(aux - 1),
+  nomeCanal: (canal, letra) => '0D 02 04 ' + hx(3 + letra) + ' ' + hx(canal - 1),
+  nomeAux: (aux, letra) => '0D 02 10 ' + hx(3 + letra) + ' ' + hx(aux - 1),
+  resolucao: '0D 03 5E 00 00'
+};
+const TOTAL_MAPA = 1 + 8 * 18 + 32 * 32;
+const quatro = (v) => [0, 0, v >> 7, v & 0x7f];
+/** Parameter change que a mesa manda sozinha (alguem mexendo nela). */
+const quadroDaMesa = (endereco, v) =>
+  mesa.paraHex([0xf0, 0x43, 0x10, 0x3e, ...endereco.split(' ').map((h) => parseInt(h, 16)), ...quatro(v), 0xf7]);
+const NOMES_AUX = ['Pastor', 'Baixo', 'Bateria', 'Guitarra', 'Teclado', 'Violao', 'Coral', 'Reserva'];
+const midiDoMapa = { ...midiDeTeste, mapa: true };
+
+/** O que a mesa de teste tem, no formato "enderecos" dela. */
+function mesaDoMapa({
+  send = (a, c) => a * 20 + c, on = (a, c) => c % 3 !== 0, master = (a) => 100 + a * 10, masterOn = (a) => a !== 8,
+  nomeCanal = (c) => 'Voz ' + c, nomeAux = (a) => NOMES_AUX[a - 1], resolucao = 1, sem = [], extra = {}
+} = {}) {
+  const e = { [END.resolucao]: quatro(resolucao) };
+  for (let a = 1; a <= 8; a++) {
+    e[END.master(a)] = quatro(master(a));
+    e[END.masterOn(a)] = quatro(masterOn(a) ? 1 : 0);
+    const nome = nomeAux(a).padEnd(16);
+    for (let l = 1; l <= 16; l++) e[END.nomeAux(a, l)] = quatro(nome.charCodeAt(l - 1));
+  }
+  for (let c = 1; c <= 32; c++) {
+    for (let a = 1; a <= 8; a++) {
+      e[END.send(a, c)] = quatro(send(a, c));
+      e[END.sendOn(a, c)] = quatro(on(a, c) ? 1 : 0);
+    }
+    const nome = nomeCanal(c).padEnd(16);
+    for (let l = 1; l <= 16; l++) e[END.nomeCanal(c, l)] = quatro(nome.charCodeAt(l - 1));
+  }
+  for (const k of sem) delete e[k];
+  return { ...e, ...extra };
+}
+
+/** Espera o /api/status passar na condicao. */
+async function esperarStatus(m, condicao, descricao, ms = 20000) {
+  const limite = Date.now() + ms;
+  let s;
+  while (Date.now() < limite) {
+    s = await m.status();
+    if (condicao(s)) return s;
+    await pausa(100);
+  }
+  throw new Error('esperei ' + ms + ' ms e o status nao chegou a: ' + descricao + '\n' + JSON.stringify(s && s.mapa));
+}
+
+const ehMudanca = (c) => (c.bytes[2] & 0xf0) === 0x10;
+const valorDoQuadro = (bytes) => (bytes[11] << 7) + bytes[12];
+
+test('modo mapa: sem calibrar nada, acha a rota, le a mesa toda e cada celular mexe so no proprio fone', async (t) => {
+  // Bumbo calibrado mais adiante (plano B), no formato antigo: responde 64.
+  const BUMBO = '0D 01 1C 00 00';
+  let conteudo = {
+    sem: [END.send(8, 32)], // o send do canal 32 para o Aux 8 nao responde
+    nomeCanal: (c) => (c === 2 ? 'Teclado' : 'Voz ' + c),
+    nomeAux: (a) => (a === 4 ? 'Retorno' : NOMES_AUX[a - 1]),
+    extra: { [BUMBO]: [0x00, 0x40] }
+  };
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1], saidas: [SINTETIZADOR, USB.out1],
+      txCh: 0, rxCh: 2, portaRx: USB.out1, portaTx: USB.in1, portaResposta: USB.in1,
+      enderecos: mesaDoMapa({ ...conteudo, nomeCanal: (c) => 'Voz ' + c, nomeAux: (a) => NOMES_AUX[a - 1] }),
+      guardar: true
+    },
+    config: { midi: midiDoMapa, aplicarEstadoAoIniciar: false, controles: [] }
+  });
+  const { b } = m;
+  const fone3 = await conectarCelular(b.porta);
+  const outro3 = await conectarCelular(b.porta);
+  const fone4 = await conectarCelular(b.porta);
+  const todos = [fone3, outro3, fone4];
+  const mudancasDesde = (desde) => chegadasNaMesa(b.linhas, desde).filter(ehMudanca);
+  const pronta = (c, ms = 20000) => c.receber('mesa:sincronia', (x) => x.fase !== 'lendo', ms);
+  /** Manda e espera a mesa de teste aceitar exatamente esse quadro. */
+  async function mandaEConfere(cel, msg, hex) {
+    const desde = b.linhas.length;
+    cel.enviar(msg);
+    await esperarAte(() => mudancasDesde(desde).some((c) => c.hex === hex && c.aceitou), 'a mesa aceitar ' + hex);
+  }
+
+  try {
+    await t.test('sem nenhum controle calibrado, a conexao testa a mesa pelo send do canal 1 no Aux 1 e acha a rota', async () => {
+      const s = await esperarStatus(m, (x) => x.mapa.pronta, 'a leitura ficar pronta');
+      assert.equal(s.rota.dispositivo, 2);
+      assert.equal(s.rota.reconfirmada, true);
+      const teste = linhasDoTeste(b.linhas);
+      assert.deepEqual(chegadasNaMesa(teste.linhas).map((c) => c.hex),
+        [0, 1, 2, 2, 3].map((n) => 'F0 43 ' + hx(0x30 | n) + ' 3E ' + END.send(1, 1) + ' F7'));
+      assert.deepEqual(chegadasNaMesa(b.linhas.slice(0, teste.ini)), [], 'nada antes do teste');
+    });
+
+    await t.test('a leitura so manda pedido de leitura (3n) no n da rota, todo o mapa, e pergunta de novo uma vez o que faltou', async () => {
+      const teste = linhasDoTeste(b.linhas);
+      const pedidos = chegadasNaMesa(b.linhas, teste.fim);
+      assert.ok(pedidos.every((c) => c.bytes[2] === 0x32), 'saiu algo que nao e pedido no n da rota');
+      assert.ok(pedidos.every((c) => c.aceitou));
+      assert.equal(pedidos.length, TOTAL_MAPA + 1, 'um pedido por endereco, mais a segunda tentativa do que faltou');
+      const faltou = 'F0 43 32 3E ' + END.send(8, 32) + ' F7';
+      assert.equal(pedidos.filter((c) => c.hex === faltou).length, 2);
+      const pedidosHex = new Set(pedidos.map((c) => mesa.paraHex(c.bytes.slice(4, 9))));
+      for (const endereco of Object.keys(mesaDoMapa())) assert.ok(pedidosHex.has(endereco), 'nao pediu ' + endereco);
+
+      const s = await m.status();
+      assert.deepEqual({ ...s.mapa, sincronizadaEm: typeof s.mapa.sincronizadaEm, auxes: s.mapa.auxes.map((a) => a.nome) }, {
+        ativo: true, pronta: true, resolucao: 'baixa', resolucaoCrua: 1,
+        motivoResolucao: 'nenhum valor acima de 255 (Fader Resolution cru = 1)',
+        lidos: TOTAL_MAPA - 1, total: TOTAL_MAPA,
+        semResposta: ['kInputAUX/kAUX8Level#32'], semRespostaTotal: 1,
+        sincronizadaEm: 'string', lendo: null, auxes: NOMES_AUX
+      });
+      assert.ok(!Number.isNaN(Date.parse(s.mapa.sincronizadaEm)));
+      for (const c of todos) {
+        const r = await c.receber('mesa:resumo', (x) => x.pronta, 5000);
+        assert.deepEqual(r.auxes, NOMES_AUX.map((nome, i) => ({ aux: i + 1, nome })));
+        assert.equal(r.resolucao, 'baixa');
+        assert.equal(r.sincronizadaEm, s.mapa.sincronizadaEm);
+      }
+    });
+
+    await t.test('escolher o fone traz os 32 canais com nome, valor e On; Aux invalido e recusado', async () => {
+      fone3.enviar({ type: 'fone:escolher', aux: 3 });
+      const e3 = await fone3.receber('fone:estado');
+      assert.equal(e3.aux, 3);
+      assert.equal(e3.nome, 'Bateria');
+      assert.deepEqual(e3.master, { valor: 130 / 255, on: true });
+      assert.equal(e3.canais.length, 32);
+      assert.deepEqual(e3.canais[4], { canal: 5, nome: 'Voz 5', valor: 65 / 255, on: true, confirmado: true });
+      assert.deepEqual(e3.canais[2], { canal: 3, nome: 'Voz 3', valor: 63 / 255, on: false, confirmado: true });
+      outro3.enviar({ type: 'fone:escolher', aux: 3 });
+      await outro3.receber('fone:estado');
+      fone4.enviar({ type: 'fone:escolher', aux: 8 });
+      const e8 = await fone4.receber('fone:estado');
+      assert.deepEqual(e8.master, { valor: 180 / 255, on: false });
+      assert.deepEqual(e8.canais[31], { canal: 32, nome: 'Voz 32', valor: null, on: true, confirmado: false });
+
+      for (const aux of [0, 9, '3', 2.5, null]) {
+        fone3.enviar({ type: 'fone:escolher', aux });
+        assert.match((await fone3.receber('controle:erro')).message, /Aux 1 a Aux 8/);
+      }
+    });
+
+    await t.test('endereco que nao respondeu nunca e escrito', async () => {
+      const desde = b.linhas.length;
+      fone4.enviar({ type: 'fone:send', aux: 8, canal: 32, valor: 1 });
+      assert.match((await fone4.receber('controle:erro')).message, /nao confirmou/);
+      await pausa(150);
+      assert.deepEqual(mudancasDesde(desde), [], 'saiu Parameter change para endereco sem confirmacao');
+      fone4.enviar({ type: 'fone:escolher', aux: 4 });
+      await fone4.receber('fone:estado');
+    });
+
+    await t.test('mexer: sai Parameter change no endereco do mapa, com o n da rota e a escala LOW; a mesa aceita; so o mesmo Aux fica sabendo', async () => {
+      for (const c of todos) c.esquecer();
+      const desde = b.linhas.length;
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 5, valor: 1 }, 'F0 43 12 3E 7F 01 23 08 04 00 00 01 7F F7');
+      assert.deepEqual(await outro3.receber('fone:mudou'), { type: 'fone:mudou', aux: 3, canal: 5, campo: 'valor', valor: 1 });
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 5, valor: 0.5 }, 'F0 43 12 3E 7F 01 23 08 04 00 00 01 00 F7');
+      assert.equal((await outro3.receber('fone:mudou')).valor, 128 / 255);
+      // Fora de 0..1: nunca passa do maximo da escala (255 em LOW).
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 5, valor: 7 }, 'F0 43 12 3E 7F 01 23 08 04 00 00 01 7F F7');
+      await mandaEConfere(fone3, { type: 'fone:sendOn', aux: 3, canal: 5, on: false }, 'F0 43 12 3E 7F 01 23 06 04 00 00 00 00 F7');
+      assert.deepEqual(await outro3.receber('fone:mudou', (x) => x.campo === 'on'),
+        { type: 'fone:mudou', aux: 3, canal: 5, campo: 'on', valor: false });
+      await mandaEConfere(fone3, { type: 'fone:master', aux: 3, valor: 0.2 }, 'F0 43 12 3E 7F 01 39 00 02 00 00 00 33 F7');
+      await mandaEConfere(fone3, { type: 'fone:masterOn', aux: 3, on: false }, 'F0 43 12 3E 7F 01 36 00 02 00 00 00 00 F7');
+      assert.deepEqual(await outro3.receber('fone:mudou', (x) => x.campo === 'masterOn'),
+        { type: 'fone:mudou', aux: 3, canal: null, campo: 'masterOn', valor: false });
+
+      for (const msg of [
+        { type: 'fone:send', aux: 3, canal: 33, valor: 0.5 }, { type: 'fone:send', aux: 3, canal: 5, valor: 'x' },
+        { type: 'fone:sendOn', aux: 3, canal: 5, on: 'sim' }, { type: 'fone:master', aux: 0, valor: 0.5 },
+        { type: 'fone:masterOn', aux: 3 }
+      ]) {
+        fone3.enviar(msg);
+        await fone3.receber('controle:erro');
+      }
+      await pausa(150);
+      const mudancas = mudancasDesde(desde);
+      assert.equal(mudancas.length, 6, mudancas.map((c) => c.hex).join('\n'));
+      assert.ok(mudancas.every((c) => c.aceitou && c.bytes[2] === 0x12));
+      assert.ok(mudancas.every((c) => valorDoQuadro(c.bytes) <= 255), 'valor acima de 255 em LOW');
+      assert.equal(fone3.viu('fone:mudou'), false, 'quem mexeu recebeu o proprio eco');
+      assert.equal(fone4.todas.some((x) => x.type === 'fone:mudou'), false, 'o fone do Aux 4 soube do Aux 3');
+
+      // Lendo a mesa de novo, o que o app mandou esta la.
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      const e3 = await fone3.receber('fone:estado', () => true, 5000);
+      assert.deepEqual(e3.canais[4], { canal: 5, nome: 'Voz 5', valor: 1, on: false, confirmado: true });
+      assert.deepEqual(e3.master, { valor: 51 / 255, on: false });
+      assert.equal(fone4.todas.some((x) => x.type === 'fone:estado' && x.aux === 3), false);
+    });
+
+    await t.test('quem mexe na mesa: o Aux vai so para quem escolheu ele; nome de canal vai para todos', async () => {
+      for (const c of todos) c.esquecer();
+      m.mesaEmite(quadroDaMesa(END.send(3, 7), 64));
+      for (const c of [fone3, outro3]) {
+        assert.deepEqual(await c.receber('fone:mudou'), { type: 'fone:mudou', aux: 3, canal: 7, campo: 'valor', valor: 64 / 255 });
+      }
+      // Fader acima de 1023 (nao existe na mesa) e ignorado: nem valor, nem escala HIGH.
+      m.mesaEmite(quadroDaMesa(END.send(3, 8), 1024), quadroDaMesa(END.send(3, 8), 50));
+      assert.deepEqual(await fone3.receber('fone:mudou', (x) => x.canal === 8),
+        { type: 'fone:mudou', aux: 3, canal: 8, campo: 'valor', valor: 50 / 255 });
+      assert.equal(fone3.viu('mesa:resumo'), false, 'o 1024 mexeu na escala');
+      assert.equal((await m.status()).mapa.resolucao, 'baixa');
+      const nome = 'Teclado'.padEnd(16);
+      m.mesaEmite(...Array.from({ length: 16 }, (_, i) => quadroDaMesa(END.nomeCanal(2, i + 1), nome.charCodeAt(i))));
+      // Cada celular recebe com o Aux que escolheu (o app ignora mudanca de outro Aux).
+      for (const [c, aux] of [[fone3, 3], [outro3, 3], [fone4, 4]]) {
+        assert.deepEqual(await c.receber('fone:mudou', (x) => x.campo === 'nome'),
+          { type: 'fone:mudou', aux, canal: 2, campo: 'nome', valor: 'Teclado' });
+      }
+      const aux4 = 'Retorno'.padEnd(16);
+      m.mesaEmite(...Array.from({ length: 16 }, (_, i) => quadroDaMesa(END.nomeAux(4, i + 1), aux4.charCodeAt(i))));
+      assert.deepEqual(await fone4.receber('fone:mudou', (x) => x.campo === 'nome'),
+        { type: 'fone:mudou', aux: 4, canal: null, campo: 'nome', valor: 'Retorno' });
+      for (const c of todos) await c.receber('mesa:resumo', (x) => x.auxes[3].nome === 'Retorno');
+      await pausa(200);
+      assert.equal(fone4.todas.some((x) => x.type === 'fone:mudou' && x.aux === 3), false);
+      assert.equal(fone3.todas.some((x) => x.type === 'fone:mudou' && x.aux === 4), false);
+      assert.equal(fone4.todas.some((x) => x.type === 'fone:mudou' && x.campo === 'valor'), false,
+        'o send do Aux 3 que a mesa mudou chegou no fone do Aux 4');
+    });
+
+    await t.test('troca de cena le a mesa de novo (no lugar da releitura antiga), em lotes com pausa, e o fone ve os valores novos', async () => {
+      conteudo = { ...conteudo, send: (a, c) => (a === 3 && c === 6 ? 99 : a * 20 + c) };
+      m.mesaFica({ enderecos: mesaDoMapa(conteudo) });
+      for (const c of todos) c.esquecer();
+      const desde = b.linhas.length;
+      m.mesaEmite('C0 02');
+      await fone3.receber('cena', (x) => x.atual && x.atual.numero === 3);
+      const lendo = await fone3.receber('mesa:sincronia', (x) => x.fase === 'lendo', 5000);
+      const fim = await pronta(fone3);
+      assert.deepEqual({ fase: fim.fase, lidos: fim.lidos, total: fim.total }, { fase: 'pronta', lidos: TOTAL_MAPA - 1, total: TOTAL_MAPA });
+      // So conta o que o app mexe (send, On e master: 528), nao letra de nome.
+      assert.match(fim.motivo, /^1 de 528 controle\(s\) sem resposta/);
+      const ms = fone3.tempos[fone3.todas.indexOf(fim)] - fone3.tempos[fone3.todas.indexOf(lendo)];
+      assert.ok(ms >= 1000, 'leu ' + TOTAL_MAPA + ' enderecos em ' + ms + ' ms: sem as pausas entre os lotes');
+      const e3 = await fone3.receber('fone:estado', () => true, 5000);
+      assert.equal(e3.canais[5].valor, 99 / 255);
+      assert.equal(e3.canais[1].nome, 'Teclado');
+      const quadros = chegadasNaMesa(b.linhas, desde);
+      assert.ok(quadros.every((c) => c.bytes[2] === 0x32), 'saiu algo que nao e pedido');
+      assert.equal(quadros.length, TOTAL_MAPA + 1);
+      assert.equal(fone3.viu('cena:relida'), false, 'sem calibrados nao ha releitura antiga');
+      assert.equal(b.linhas.slice(desde).some((l) => l.includes('[cena] relendo')), false);
+    });
+
+    await t.test('lendo a mesa: calibrar, criar canais, testar a mesa e outra leitura sao recusados; sem resposta, nada fica confirmado', async () => {
+      m.mesaFica({ rxLigado: false });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      await fone3.receber('mesa:sincronia', (x) => x.fase === 'lendo');
+      fone3.enviar({ type: 'learn:iniciar', control: null, label: 'Caixa', kind: 'canal' });
+      assert.deepEqual(await fone3.receber('learn:erro'),
+        { type: 'learn:erro', message: 'Estou lendo a mesa agora. Espere uns segundos para calibrar.', etapa: 'nome' });
+      fone3.enviar({ type: 'gerar:canais', base: 'qualquer', canais: [2] });
+      assert.match((await fone3.receber('gerar:erro')).message, /lendo a mesa/);
+      fone3.enviar({ type: 'mesa:testar' });
+      assert.match((await fone3.receber('controle:erro')).message, /lendo a mesa/);
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.match((await fone3.receber('controle:erro')).message, /Ja estou lendo/);
+
+      const falhou = await pronta(fone3, 30000);
+      assert.deepEqual({ fase: falhou.fase, lidos: falhou.lidos }, { fase: 'falhou', lidos: 0 });
+      assert.match(falhou.motivo, /nao respondeu a nenhum pedido/);
+      await fone3.receber('mesa:resumo', (x) => x.pronta === false);
+      assert.equal(fone3.viu('learn:pronto-para'), false);
+
+      const desde = b.linhas.length;
+      fone3.enviar({ type: 'fone:send', aux: 3, canal: 5, valor: 0.3 });
+      assert.match((await fone3.receber('controle:erro')).message, /nao confirmou/);
+      await pausa(150);
+      assert.deepEqual(mudancasDesde(desde), []);
+
+      m.mesaFica({ rxLigado: true });
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+    });
+
+    await t.test('com calibracao aberta, a leitura da troca de cena espera; o calibrado (plano B) entra na leitura e vem o cena:relida', async () => {
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'learn:iniciar', control: null, label: 'Bumbo', kind: 'canal' });
+      await fone3.receber('learn:pronto-para');
+      const desde = b.linhas.length;
+      m.mesaEmite('C0 03'); // cena 4
+      await fone3.receber('cena', (x) => x.atual && x.atual.numero === 4);
+      await pausa(700);
+      assert.equal(fone3.viu('mesa:sincronia'), false, 'leu a mesa com a calibracao aberta');
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde), []);
+
+      m.mesaEmite(mesa.paraHex(MINIMO));
+      await fone3.receber('learn:midi');
+      fone3.enviar({ type: 'learn:capturar', step: 'min' });
+      await fone3.receber('learn:capturado');
+      await pausa(250);
+      m.mesaEmite(mesa.paraHex(MAXIMO));
+      await fone3.receber('learn:midi');
+      fone3.enviar({ type: 'learn:capturar', step: 'max' });
+      await fone3.receber('learn:capturado');
+      fone3.enviar({ type: 'learn:salvar' });
+      await fone3.receber('learn:salvo');
+
+      const fim = await pronta(fone3);
+      assert.deepEqual({ fase: fim.fase, lidos: fim.lidos, total: fim.total }, { fase: 'pronta', lidos: TOTAL_MAPA, total: TOTAL_MAPA + 1 });
+      assert.deepEqual(await fone3.receber('cena:relida', () => true, 5000),
+        { type: 'cena:relida', numero: 4, lidos: ['bumbo'], semResposta: [] });
+      // (o primeiro "state" com o bumbo e o da calibracao, com o valor inicial)
+      await fone3.receber('state', (x) => x.values.bumbo === 64 / 255, 5000);
+      assert.equal(fone3.viu('mesa:teste'), false, 'testou a mesa com a rota conferida');
+      const quadros = chegadasNaMesa(b.linhas, desde);
+      assert.ok(quadros.every((c) => c.bytes[2] === 0x32));
+      assert.ok(quadros.some((c) => c.hex === pedidoHex(bumboDoTx(0), 2)), 'o calibrado nao foi relido');
+    });
+
+    await t.test('criando canais, pedir leitura e recusado e a leitura da troca de cena espera a criacao acabar', async () => {
+      for (const c of todos) c.esquecer();
+      const desde = b.linhas.length;
+      fone3.enviar({ type: 'gerar:canais', base: 'bumbo', canais: [2] }); // canal 2 do bumbo fica calado: 300 ms
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.match((await fone3.receber('controle:erro')).message, /criando canais/);
+      m.mesaEmite('C0 04'); // cena 5
+      assert.deepEqual((await fone3.receber('gerar:fim', () => true, 5000)).semResposta, [2]);
+      await pronta(fone3);
+      await fone3.receber('cena:relida', (x) => x.numero === 5, 5000);
+      const quadros = chegadasNaMesa(b.linhas, desde);
+      assert.equal(quadros[0].hex, mesa.paraHex(mesa.montarPedido(bumboDoTx(0), 2, 2)), 'a leitura nao esperou a criacao');
+      assert.ok(quadros.slice(1).length >= TOTAL_MAPA);
+      assert.ok(quadros.every((c) => c.bytes[2] === 0x32));
+    });
+
+    await t.test('testando a mesa, pedir leitura e recusado; com a rota conferida, a mesa e lida logo depois do teste', async () => {
+      for (const c of todos) c.esquecer();
+      const desde = b.linhas.length;
+      fone3.enviar({ type: 'mesa:testar' });
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.match((await fone3.receber('controle:erro')).message, /testando a mesa/);
+      assert.equal((await fone3.receber('mesa:teste', (x) => x.fase !== 'testando', 8000)).fase, 'ok');
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      const teste = linhasDoTeste(b.linhas, desde);
+      assert.deepEqual(chegadasNaMesa(teste.linhas).map((c) => c.hex), [2, 2, 3].map((n) => pedidoHex(bumboDoTx(0), n)));
+      const depois = chegadasNaMesa(b.linhas, teste.fim);
+      assert.ok(depois.length >= TOTAL_MAPA && depois.every((c) => c.bytes[2] === 0x32));
+    });
+
+    await t.test('valor lido acima de 255 prova HIGH: a escala vira 1023 e mexer manda ate 1023', async () => {
+      m.mesaFica({ guardar: false, enderecos: mesaDoMapa({ ...conteudo, master: (a) => (a === 1 ? 823 : 100 + a * 10), resolucao: 0 }) });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      await fone3.receber('mesa:resumo', (x) => x.resolucao === 'alta', 5000);
+      const e3 = await fone3.receber('fone:estado', () => true, 5000);
+      assert.equal(e3.canais[4].valor, 65 / 1023);
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 9, valor: 1 }, 'F0 43 12 3E 7F 01 23 08 08 00 00 07 7F F7');
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 9, valor: 0.5 }, 'F0 43 12 3E 7F 01 23 08 08 00 00 04 00 F7');
+      const s = await m.status();
+      assert.deepEqual([s.mapa.resolucao, s.mapa.resolucaoCrua, s.mapa.motivoResolucao], ['alta', 0, 'valor lido acima de 255']);
+    });
+
+    await t.test('HIGH -> LOW com um endereco sem resposta: o valor velho acima de 255 nao segura a escala HIGH', async () => {
+      // O operador passa a mesa para LOW; o master do Aux 1 (que estava em 823)
+      // nao responde mais. A escala tem que voltar para LOW.
+      m.mesaFica({ enderecos: mesaDoMapa({ ...conteudo, resolucao: 0, sem: [...conteudo.sem, END.master(1)] }) });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      await fone3.receber('mesa:resumo', (x) => x.resolucao === 'baixa', 5000);
+      const s = await m.status();
+      assert.equal(s.mapa.resolucao, 'baixa', 'o 823 velho do master do Aux 1 segurou HIGH');
+      assert.ok(s.mapa.semResposta.includes('kAUXFader/kFader#1'));
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 9, valor: 1 }, 'F0 43 12 3E 7F 01 23 08 08 00 00 01 7F F7');
+      // O master que nao respondeu fica desconhecido e nao e escrito.
+      fone3.enviar({ type: 'fone:master', aux: 1, valor: 1 });
+      assert.match((await fone3.receber('controle:erro')).message, /nao confirmou/);
+    });
+
+    await t.test('lendo a mesa, o que o celular mexe espera a leitura acabar e vale mais que a resposta velha', async () => {
+      m.mesaFica({ enderecos: mesaDoMapa({ ...conteudo, resolucao: 0 }) }); // a mesa responde 70 no canal 10 do Aux 3
+      for (const c of todos) c.esquecer();
+      const desde = b.linhas.length;
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      await fone3.receber('mesa:sincronia', (x) => x.fase === 'lendo');
+      fone3.enviar({ type: 'fone:send', aux: 3, canal: 10, valor: 1 });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      const e3 = await fone3.receber('fone:estado', () => true, 5000);
+      assert.equal(e3.canais[9].valor, 1, 'a resposta velha da leitura passou por cima do que o musico mexeu');
+      const esperado = 'F0 43 12 3E 7F 01 23 08 09 00 00 01 7F F7';
+      await esperarAte(() => mudancasDesde(desde).some((c) => c.hex === esperado && c.aceitou), 'o send sair depois da leitura');
+      const chegadas = chegadasNaMesa(b.linhas, desde);
+      const iEnvio = chegadas.findIndex((c) => c.hex === esperado);
+      const iUltimoPedido = chegadas.map(ehPedido).lastIndexOf(true);
+      assert.ok(iEnvio > iUltimoPedido, 'o Parameter change saiu no meio da leitura');
+      assert.equal(chegadas.filter(ehMudanca).length, 1);
+    });
+
+    await t.test('On que responde fora de 0 ou 1 nao confirma o endereco, e ele nao e escrito', async () => {
+      m.mesaFica({ enderecos: mesaDoMapa({ ...conteudo, resolucao: 0, extra: { ...conteudo.extra, [END.sendOn(3, 11)]: quatro(5) } }) });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      const e3 = await fone3.receber('fone:estado', () => true, 5000);
+      assert.deepEqual({ on: e3.canais[10].on, confirmado: e3.canais[10].confirmado }, { on: null, confirmado: false });
+      assert.ok((await m.status()).mapa.semResposta.includes('kInputAUX/kAUX3On#11'));
+      const desde = b.linhas.length;
+      fone3.enviar({ type: 'fone:sendOn', aux: 3, canal: 11, on: true });
+      assert.match((await fone3.receber('controle:erro')).message, /nao confirmou/);
+      await pausa(150);
+      assert.deepEqual(mudancasDesde(desde), []);
+    });
+
+    await t.test('so a leitura de Fader Resolution, sem codificacao conferida, nao basta: na duvida, LOW', async () => {
+      m.mesaFica({ enderecos: mesaDoMapa({ ...conteudo, resolucao: 0 }) });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      assert.equal((await pronta(fone3)).fase, 'pronta');
+      await fone3.receber('mesa:resumo', (x) => x.resolucao === 'baixa', 5000);
+      await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 9, valor: 1 }, 'F0 43 12 3E 7F 01 23 08 08 00 00 01 7F F7');
+      const s = await m.status();
+      assert.deepEqual([s.mapa.resolucao, s.mapa.resolucaoCrua], ['baixa', 0]);
+      assert.match(s.mapa.motivoResolucao, /nenhum valor acima de 255/);
+    });
+
+    await t.test('resposta atrasada acima de 255 com a escala em LOW nao sobe a escala; o envio seguinte sai ate 255', async () => {
+      // O send do canal 32 para o Aux 7 responde 300, 1,8 s depois: chega
+      // depois do fim da leitura, na quarentena, como resposta velha.
+      const atrasado = END.send(7, 32);
+      m.mesaFica({
+        enderecos: mesaDoMapa({ ...conteudo, resolucao: 0, extra: { ...conteudo.extra, [atrasado]: quatro(300) } }),
+        atrasos: { [atrasado]: 1800 }
+      });
+      for (const c of todos) c.esquecer();
+      try {
+        fone3.enviar({ type: 'mesa:sincronizar' });
+        assert.equal((await pronta(fone3)).fase, 'pronta');
+        assert.equal((await m.status()).mapa.resolucao, 'baixa');
+        await esperarAte(() => b.linhas.filter((l) => l.includes('resposta atrasada da mesa') &&
+          l.includes(atrasado)).length >= 2, 'as duas respostas atrasadas chegarem', 6000);
+        assert.equal((await m.status()).mapa.resolucao, 'baixa', 'a resposta atrasada de 300 subiu a escala para HIGH');
+        await mandaEConfere(fone3, { type: 'fone:send', aux: 3, canal: 9, valor: 1 }, 'F0 43 12 3E 7F 01 23 08 08 00 00 01 7F F7');
+      } finally {
+        m.mesaFica({ atrasos: {} });
+      }
+    });
+
+    await t.test('resposta atrasada da leitura nao cai na calibracao aberta logo depois', async () => {
+      // A ultima letra do nome do canal 32 (o ultimo pedido da leitura)
+      // responde 1,8 s depois, as duas vezes: depois do fim da leitura e
+      // dentro da quarentena (2 s a partir do fim).
+      const ultima = END.nomeCanal(32, 16);
+      m.mesaFica({ atrasos: { [ultima]: 1800 } });
+      for (const c of todos) c.esquecer();
+      fone3.enviar({ type: 'mesa:sincronizar' });
+      const fim = await pronta(fone3);
+      // Faltam o send 8/32 (a mesa nao tem) e a letra atrasada.
+      assert.equal(fim.lidos, fim.total - 2, 'a letra atrasada nao podia ter chegado durante a leitura');
+      fone3.enviar({ type: 'learn:iniciar', control: null, label: 'Teclado', kind: 'canal' });
+      await fone3.receber('learn:pronto-para');
+      try {
+        await esperarAte(() => b.linhas.filter((l) => l.includes('resposta atrasada da mesa') &&
+          l.includes(ultima)).length >= 2, 'as duas respostas atrasadas chegarem', 5000);
+        assert.equal(fone3.viu('learn:midi'), false, 'a resposta atrasada virou quadro de calibracao');
+        fone3.enviar({ type: 'learn:capturar', step: 'min' });
+        assert.match((await fone3.receber('learn:erro')).message, /Parameter Change TX/);
+      } finally {
+        fone3.enviar({ type: 'learn:cancelar' });
+        m.mesaFica({ atrasos: {} });
+      }
+      const s = await m.status();
+      assert.ok(s.mapa.semResposta.includes('kInputChannelName/kChannelNameLong16#32'));
+    });
+  } finally {
+    for (const c of todos) c.fechar();
+    await m.parar();
+  }
+});
+
+test('modo mapa sem rota: a mesa nao responde ao teste, nada e lido nem escrito; com a codificacao conferida no config, a leitura de Fader Resolution decide HIGH', async (t) => {
+  const m = await bridgeComMesa({
+    mesaInicial: {
+      entradas: [USB.in1], saidas: [USB.out1],
+      txCh: 0, rxCh: 0, rxLigado: false, portaTx: USB.in1, portaResposta: USB.in1,
+      enderecos: mesaDoMapa({ resolucao: 0 })
+    },
+    // Ciclo de envio de 1 s: da para ver um lote de cada vez (teste dos 32 por ciclo).
+    config: { midi: { ...midiDoMapa, resolucaoAltaCrua: 0, intervaloEnvioMs: 1000 }, aplicarEstadoAoIniciar: false, controles: [] }
+  });
+  const { b } = m;
+  const cel = await conectarCelular(b.porta);
+  try {
+    await t.test('sem rota: o fone mostra so os nomes padrao e nada sai para a mesa alem do teste', async () => {
+      await esperarAte(() => b.linhas.some((l) => l.includes('[mesa] fim do teste da mesa')), 'o teste da mesa acabar', 10000);
+      const teste = linhasDoTeste(b.linhas);
+      const chegadas = chegadasNaMesa(teste.linhas);
+      assert.equal(chegadas.length, 16);
+      assert.ok(chegadas.every((c) => ehPedido(c) && mesa.paraHex(c.bytes.slice(4, 9)) === END.send(1, 1)));
+
+      cel.enviar({ type: 'fone:escolher', aux: 1 });
+      const e1 = await cel.receber('fone:estado');
+      assert.equal(e1.nome, 'Aux 1');
+      assert.deepEqual(e1.master, { valor: null, on: null });
+      assert.deepEqual(e1.canais[0], { canal: 1, nome: 'Canal 1', valor: null, on: null, confirmado: false });
+      assert.equal((await cel.receber('mesa:resumo')).pronta, false);
+
+      const desde = b.linhas.length;
+      cel.enviar({ type: 'fone:send', aux: 1, canal: 1, valor: 1 });
+      assert.match((await cel.receber('controle:erro')).message, /caminho/);
+      cel.enviar({ type: 'fone:masterOn', aux: 1, on: true });
+      assert.match((await cel.receber('controle:erro')).message, /caminho/);
+      cel.enviar({ type: 'mesa:sincronizar' });
+      assert.match((await cel.receber('controle:erro')).message, /Testar a mesa/);
+      await pausa(300);
+      assert.deepEqual(chegadasNaMesa(b.linhas, desde), [], 'saiu algo para a mesa sem rota');
+      assert.ok(chegadasNaMesa(b.linhas).every(ehPedido), 'saiu Parameter change sem rota');
+      const s = await m.status();
+      assert.deepEqual([s.mapa.pronta, s.mapa.lidos, s.mapa.resolucao, s.mapa.sincronizadaEm], [false, 0, null, null]);
+    });
+
+    await t.test('a mesa volta a ouvir: o teste acha a rota, a mesa e lida e a leitura de Fader Resolution decide HIGH', async () => {
+      m.mesaFica({ rxLigado: true });
+      cel.esquecer();
+      cel.enviar({ type: 'mesa:testar' });
+      assert.equal((await cel.receber('mesa:teste', (x) => x.fase !== 'testando', 8000)).fase, 'ok');
+      assert.equal((await cel.receber('mesa:sincronia', (x) => x.fase !== 'lendo', 20000)).fase, 'pronta');
+      assert.equal((await cel.receber('mesa:resumo', (x) => x.pronta, 5000)).resolucao, 'alta');
+      const s = await m.status();
+      assert.match(s.mapa.motivoResolucao, /leitura da mesa \(Fader Resolution = 0\)/);
+      const desde = b.linhas.length;
+      cel.enviar({ type: 'fone:send', aux: 1, canal: 1, valor: 1 });
+      await esperarAte(() => chegadasNaMesa(b.linhas, desde).some((c) => c.aceitou &&
+        c.hex === 'F0 43 10 3E 7F 01 23 02 00 00 00 07 7F F7'), 'o send no maximo de HIGH');
+    });
+
+    await t.test('muitos envios de uma vez saem no maximo 32 por ciclo; o resto sai no ciclo seguinte', async () => {
+      // Durante a leitura os envios esperam na fila: 40 enderecos diferentes
+      // ficam la ao mesmo tempo e saem quando ela acaba.
+      cel.esquecer();
+      const desde = b.linhas.length;
+      cel.enviar({ type: 'mesa:sincronizar' });
+      await cel.receber('mesa:sincronia', (x) => x.fase === 'lendo');
+      for (let canal = 1; canal <= 32; canal++) cel.enviar({ type: 'fone:send', aux: 1, canal, valor: 0.5 });
+      for (let canal = 1; canal <= 8; canal++) cel.enviar({ type: 'fone:send', aux: 2, canal, valor: 0.5 });
+      assert.equal((await cel.receber('mesa:sincronia', (x) => x.fase !== 'lendo', 20000)).fase, 'pronta');
+      const mudancas = () => chegadasNaMesa(b.linhas, desde).filter(ehMudanca);
+      await esperarAte(() => mudancas().length > 0, 'o primeiro lote sair', 5000);
+      await pausa(300); // o proximo ciclo e daqui a 1 s
+      assert.equal(mudancas().length, 32, 'o primeiro ciclo nao parou em 32');
+      await esperarAte(() => mudancas().length === 40, 'o resto sair no ciclo seguinte', 5000);
+      assert.ok(mudancas().every((c) => c.aceitou && valorDoQuadro(c.bytes) === 512), 'valor errado (HIGH: 0.5 = 512)');
+    });
+  } finally {
+    cel.fechar();
     await m.parar();
   }
 });

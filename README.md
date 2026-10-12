@@ -38,6 +38,39 @@ não entra cabo nenhum.
 Pode ser um Raspberry Pi ou um PC com Windows, tanto faz. O que importa é que
 seja **a máquina ligada na mesa** e que ela fique ligada.
 
+## Escolher o seu fone, sem calibrar (modo mapa)
+
+É o jeito normal de usar. Você abre o app, escolhe o seu fone (Aux 1 a 8) e
+vê os 32 canais com os nomes da mesa, já nos valores em que estão.
+
+Por trás, o bridge usa o mapa de endereços da 01V96 (veja **Créditos**):
+
+1. **Acha o caminho até a mesa** sozinho, só com pedidos de leitura, mesmo sem
+   nenhum controle calibrado (pergunta pelo send do canal 1 no Aux 1).
+2. **Lê a mesa inteira**, também só com pedidos de leitura (Parameter
+   request, que não muda o som): o send e o On de cada canal para os 8 Aux, o
+   master e o On de cada Aux, os nomes e a resolução do fader. Pede em lotes
+   pequenos, com pausa, e pergunta de novo uma vez o que não respondeu. Lê de
+   novo quando a mesa conecta, a cada troca de cena e quando você pede no app.
+3. **Escreve só no que a mesa confirmou.** Um send só vai para a mesa pelo
+   caminho conferido e se aquele endereço respondeu na leitura. O que não
+   respondeu aparece no app como "a mesa não confirmou" e nunca é mexido.
+4. **Acompanha a mesa:** se alguém mexer no send do seu Aux direto na mesa, o
+   seu celular acompanha. Mudança de um Aux só vai para quem escolheu ele.
+
+**Resolução do fader (HIGH/LOW).** Em LOW o fader vai até 255; em HIGH, até
+1023. O bridge só usa HIGH quando tem prova: algum fader lido acima de 255
+(impossível em LOW). A leitura de *Fader Resolution* aparece crua no
+diagnóstico, porque nenhum manual diz qual número é HIGH; depois de conferir
+na tela MIDI | SETUP da mesa, dá para gravar esse número em
+`midi.resolucaoAltaCrua`. Na dúvida, LOW: errar para LOW deixa o fone mais
+baixo, nunca mais alto, enquanto mandar um valor de HIGH para uma mesa em LOW
+pode levar o fone ao máximo.
+
+Os controles calibrados (abaixo) continuam funcionando como plano B, e
+também são relidos na troca de cena. Para voltar ao comportamento antigo
+(só calibrados), ponha `"mapa": false` em `midi` no `config.json`.
+
 ---
 
 ## Instalação: um comando só
@@ -319,14 +352,15 @@ No PC com Windows da mesa, o programa se atualiza sozinho. Você não precisa
 abrir terminal nem rodar o instalador de novo.
 
 - **O que faz:** a cada 30 minutos uma tarefa do Windows confere se o programa
-  está no ar (e liga de novo se tiver caído). No máximo de 6 em 6 horas ela
+  está no ar (e liga de novo se tiver caído). No máximo de hora em hora ela
   pergunta ao GitHub se existe versão nova no ramo `igreja` (o que o dono
   aprovou; o `main` não chega lá). Se existir, e só com a mesa desligada,
-  baixa, instala e **roda os testes** antes de trocar qualquer coisa. Se algum teste falhar,
-  essa versão é descartada e a atual continua.
+  baixa, instala e **roda os testes** (a suíte rápida, veja "Testes") antes
+  de trocar qualquer coisa. Se algum teste falhar, essa versão é descartada e
+  a atual continua.
 - **Sem internet:** falta de internet (ou o GitHub fora do ar) nunca faz o
-  programa recusar uma versão. Ele só espera um pouco (30 min, depois 1 h, 2 h,
-  até 6 h) e tenta de novo. Só é recusada a versão que realmente está ruim:
+  programa recusar uma versão. Ele só espera um pouco (30 min, depois 1 h) e
+  tenta de novo. Só é recusada a versão que realmente está ruim:
   testes que falham, pacote estranho, ou uma que não sobe ou cai de novo logo
   depois de instalada.
 - **Quando troca:** só com a **mesa desligada e nenhum celular conectado**.
@@ -334,6 +368,14 @@ abrir terminal nem rodar o instalador de novo.
   Cada versão fica na própria pasta (`versoes\<código>`) e a anterior é
   guardada inteira; se a nova não subir, volta sozinha para ela. Sua calibração
   (`config.json`) e o mix salvo (`estado.json`) nunca são mexidos.
+- **Atualizar agora, pelo app:** nos ajustes, **Atualizar agora** (o app pede
+  confirmação). O bridge abre o atualizador na hora (`node iniciar.js
+  atualizar --agora`), sem esperar a hora cheia nem a mesa desligar: quem
+  pediu já confirmou. Continua igual todo o resto: uma atualização por vez,
+  os testes antes de trocar, a volta sozinha se a versão nova não subir e as
+  versões recusadas. O app mostra cada fase (procurando, baixando, testando,
+  trocando, em dia ou falhou) e reconecta sozinho depois da troca. O som do
+  fone para por alguns segundos durante a troca.
 - **Ver a versão:** no app, ajustes, **Copiar diagnóstico**. A linha
   "versão" mostra a versão instalada e o resultado da última checagem.
 - **Onde fica o log:** `atualizacao.log`, na pasta de dados
@@ -368,7 +410,34 @@ conectada, o bridge avisa no rodapé que nada está saindo.
 | `npm run monitor` | mostra em hexadecimal tudo que a mesa manda |
 | `npm run learn` | a mesma calibração, pelo terminal |
 | `npm run simular` | finge ser a mesa, para testar sem hardware |
-| `npm test` | roda os testes automáticos. Não manda nada para a mesa nem mexe na sua calibração: usa MIDI simulado e uma pasta temporária |
+| `npm test` | roda todos os testes automáticos: a suíte rápida e a completa (veja abaixo). Não manda nada para a mesa nem mexe na sua calibração: usa MIDI simulado e pastas temporárias |
+| `npm run test:rapido` | só a suíte rápida: exatamente o que o PC da igreja roda antes de instalar uma versão |
+| `npm run test:completo` | só a suíte completa (lenta, só Windows) |
+
+## Testes: suíte rápida e suíte completa
+
+São duas, de propósito.
+
+- **Rápida** (`test/*.test.js`, `npm run test:rapido`, que é só `node --test`).
+  É a que o **PC da igreja** roda sozinho antes de trocar de versão: o
+  atualizador chama `node --test` sem argumentos, na pasta da versão nova, com
+  teto de 10 minutos, e **um teste que falha faz ele recusar a versão de vez**
+  (passar dos 10 minutos conta como falha passageira e atrasa a troca). Por
+  isso ela só tem teste rápido e que dá sempre o mesmo resultado: o mapa da
+  01V96, as mensagens da mesa, o bridge inteiro com a mesa de teste (inclusive
+  o modo mapa), o `config.json`, as portas MIDI e as decisões do atualizador
+  (o atualizador da versão nova é quem vai fazer as próximas atualizações).
+- **Completa** (`verificacao-completa/*.verifica.js`, `npm run
+  test:completo`). Lenta e dependente de Windows/PowerShell: o atualizador de
+  verdade contra um "GitHub" local, o "atualizar agora" ponta a ponta e o
+  instalador. A pasta e o nome `.verifica.js` ficam fora da descoberta padrão
+  do `node --test`, então o PC da igreja nunca roda essa parte.
+
+`npm test` roda as duas juntas (`scripts/testes.js`). **Antes de publicar no
+ramo `igreja`, rode `npm test` aqui**: a completa é a única que exercita a
+atualização de ponta a ponta. Teste novo que mexe com a mesa vai em `test/`
+(rápido e determinístico); teste lento, que depende do Windows ou de tempo de
+relógio, vai em `verificacao-completa/`.
 
 ## config.json
 
@@ -410,6 +479,9 @@ calibração pelo celular escreve aqui.
 | `midi.intervaloProcuraMs` | De quanto em quanto tempo ele confere se a mesa sumiu ou apareceu no cabo (padrão 10000, dez segundos) |
 | `midi.esperaRespostaMs` | Ao criar canais de uma vez ou reler os faders depois de uma troca de cena, quanto tempo ele espera a mesa responder cada pedido antes de dar como "sem resposta" (padrão 300) |
 | `midi.esperaCenaMs` | Depois da última mensagem de troca de cena, quanto ele espera a mesa assentar antes de reler os faders (padrão 400). Aumente se a cena usa fade |
+| `midi.mapa` | `true` (padrão) liga o modo mapa: escolher o fone e ler a mesa sem calibrar. `false` volta ao comportamento antigo, só com controles calibrados |
+| `midi.loteSincronia` / `midi.pausaSincroniaMs` | Na leitura da mesa, quantos pedidos vão por lote e a pausa entre os lotes (padrão 16 e 20 ms). Mandar tudo de uma vez faz a mesa responder só parte |
+| `midi.resolucaoAltaCrua` | O número que *Fader Resolution* traz quando a mesa está em HIGH. Nenhum manual documenta, então o padrão é `null` e só um fader lido acima de 255 prova HIGH. Preencha só depois de conferir na mesa (o valor cru aparece no diagnóstico) |
 | `aplicarEstadoAoIniciar` | Se `true`, reaplica o último mix na mesa ao ligar. É o que o botão "devolver o meu mix" do app liga e desliga |
 | `cenas` | Nome de cada cena, pelo número (`"3": "Louvor"`). O app escreve aqui quando você dá nome a uma cena |
 
@@ -456,6 +528,13 @@ Celular para o bridge:
 { "type": "config:devolverMix", "ligado": true }
 { "type": "cena:nomear", "numero": 3, "nome": "Louvor" }
 { "type": "mesa:testar" }
+{ "type": "fone:escolher", "aux": 3 }
+{ "type": "fone:send",     "aux": 3, "canal": 5, "valor": 0.72 }
+{ "type": "fone:sendOn",   "aux": 3, "canal": 5, "on": false }
+{ "type": "fone:master",   "aux": 3, "valor": 0.8 }
+{ "type": "fone:masterOn", "aux": 3, "on": true }
+{ "type": "mesa:sincronizar" }
+{ "type": "atualizar:agora" }
 ```
 
 Bridge para o celular:
@@ -475,7 +554,56 @@ Bridge para o celular:
 { "type": "controle:erro", "message": "Escreva um nome para o controle." }
 { "type": "cena", "atual": { "numero": 3, "nome": "Louvor", "em": "2026-10-05T19:02:11.000Z", "origem": "programa", "bruto": "C0 02" }, "nomes": { "3": "Louvor" }, "vistas": [1, 3] }
 { "type": "cena:relida", "numero": 3, "lidos": ["bumbo", "caixa"], "semResposta": ["volume-geral"] }
+{ "type": "mesa:resumo", "pronta": true, "auxes": [ { "aux": 1, "nome": "Pastor" }, { "aux": 2, "nome": "Aux 2" } ], "resolucao": "baixa", "sincronizadaEm": "2026-10-11T19:02:11.000Z" }
+{ "type": "mesa:sincronia", "fase": "lendo", "lidos": 320, "total": 1169, "motivo": null }
+{ "type": "fone:estado", "aux": 3, "nome": "Bateria", "master": { "valor": 0.8, "on": true }, "canais": [ { "canal": 1, "nome": "Voz", "valor": 0.5, "on": true, "confirmado": true } ] }
+{ "type": "fone:mudou", "aux": 3, "canal": 5, "campo": "valor", "valor": 0.72 }
+{ "type": "atualizar:estado", "fase": "testando", "mensagem": "Testando a versao 2222222 antes de trocar." }
 ```
+
+**Modo mapa.** `mesa:resumo` vai para todos ao conectar, no fim de cada
+leitura, quando a mesa ou o caminho mudam e quando a equipe renomeia um Aux.
+`pronta` só é `true` com a mesa no cabo, o caminho conferido e uma leitura que
+teve resposta; numa releitura (troca de cena) continua `true` até ela
+acabar. `auxes[].nome` é o nome da mesa ou `"Aux N"` quando ainda não foi
+lido; `resolucao` é `"baixa"`, `"alta"` ou `null` (nunca leu).
+`mesa:sincronia` vai para todos: `lendo` no começo e no máximo a cada 250 ms
+(com `lidos` e `total`), depois `pronta` (com `motivo` dizendo quantos
+controles que o app mexe, send, On, master e calibrados, ficaram sem
+resposta, ou `null`) ou `falhou` (a mesa não respondeu nada, saiu do cabo ou
+a porta foi trocada). A escala HIGH/LOW é decidida só com o que essa leitura
+trouxe, e o que não respondeu volta a ser desconhecido (`null`). Uma resposta
+só confirma o endereço se o valor fizer sentido para ele (On e master On: 0
+ou 1; fader: até 1023). Uma leitura interrompida por outra troca de cena não
+avisa nada: a seguinte avisa por ela.
+
+`fone:escolher` liga o celular a um Aux (um por celular) e responde
+`fone:estado`, que também chega para quem escolheu aquele Aux no fim de cada
+leitura. Nos canais, `valor` é 0 a 1 (`null` se ainda não lido), `on` é
+`true`/`false` (`null` se ainda não lido) e `confirmado` diz se a mesa
+respondeu o nível e o On daquele canal na última leitura: só esses podem ser
+mexidos. `fone:send`, `fone:sendOn`, `fone:master` e `fone:masterOn` vão para
+a mesa pela fila de sempre (no máximo um envio por endereço a cada
+`intervaloEnvioMs`); recusa (sem mesa, sem caminho conferido, endereço sem
+confirmação, valor inválido) volta como `controle:erro` só para quem pediu, na
+hora, e nada sai para a mesa. Enquanto o bridge lê a mesa (leitura do mapa, releitura de cena ou criação
+de canais), o que o celular mexe espera na fila e sai logo depois, com o
+último valor; a resposta velha da leitura nunca passa por cima dele.
+`fone:mudou` avisa uma mudança: de outro celular
+(nunca volta para quem mexeu) ou da mesa, só para quem escolheu aquele Aux;
+`canal` é `null` em `master`, `masterOn` e no nome do Aux. O nome de um canal
+(`campo: "nome"`) vai para todos, cada um com o Aux que escolheu em `aux`.
+`mesa:sincronizar` pede uma leitura agora (recusada com `controle:erro` se a
+mesa não está no cabo, não há caminho conferido ou outra coisa está rodando).
+A leitura nunca roda junto com o teste da mesa, a criação de canais, a
+calibração ou a releitura: quem chega depois espera ou é recusado.
+
+`atualizar:agora` só funciona no PC da mesa instalado pelo instalador do
+Windows (fora dele, `controle:erro`). `atualizar:estado` vai para todos, com
+`fase` `verificando`, `baixando`, `testando`, `trocando`, `em-dia` ou
+`falhou` e uma `mensagem` curta. Se o atualizador não der nenhum sinal em 2
+minutos, vira `falhou` (ele nem abriu). Depois da troca, o bridge novo manda o fim
+(`em-dia` ou `falhou`) para quem reconectar, por até 20 minutos.
 
 Ao conectar, o celular recebe os três primeiros e a `cena`. Depois disso, toda
 mudança vira um `state` enviado para os outros celulares, mantendo todo mundo
@@ -507,8 +635,10 @@ ou a porta foi trocada, ele vem como estava e nada é gravado. `motivo` diz o
 que aconteceu e `conferir` traz a lista do que olhar na mesa, em texto
 puro, com os nomes de menu em maiúsculas (vazia quando o teste parou no
 meio). Logo depois de `ok` ou `falhou`, todos recebem o `status`, que traz
-`rota` (`{ saida, canalMidi, em, reconfirmada }`, ou `null` sem caminho). Pedir o teste sem a mesa no cabo, sem nenhum controle
-calibrado ou com outra coisa rodando volta como `controle:erro`. Durante o
+`rota` (`{ saida, canalMidi, em, reconfirmada }`, ou `null` sem caminho). Sem
+nenhum controle calibrado, o teste pergunta pelo send do canal 1 no Aux 1, do
+mapa (com `"mapa": false`, ele pede para calibrar antes). Pedir o teste sem a
+mesa no cabo ou com outra coisa rodando volta como `controle:erro`. Durante o
 teste, `learn:iniciar` é recusado com `learn:erro` (`"etapa": "nome"`) e
 `gerar:canais` com `gerar:erro`; o `gerar:canais` que disparou o teste
 continua sozinho quando ele acha o caminho (ou volta `gerar:erro` se não
@@ -527,6 +657,13 @@ vira uma linha só, com a contagem em `vezes` e o `em` da última) e
 `enviaCom`, o começo que sai de verdade, por exemplo `F0 43 13`: o `hex`
 guarda o canal Tx da calibração, e com a rota o terceiro byte sai trocado
 pelo canal em que a mesa escuta). Nada disso é dado pessoal.
+
+Também em `/api/status`, `mapa`: `ativo`, `pronta`, `resolucao`,
+`resolucaoCrua` (o número de *Fader Resolution* como a mesa mandou),
+`motivoResolucao`, `lidos` e `total` da última leitura, `semResposta` (até 60
+endereços que a mesa não confirmou, como `kInputAUX/kAUX8Level#32` = send do
+canal 32 para o Aux 8), `semRespostaTotal`, `sincronizadaEm`, `lendo` (`{ lidos,
+total }` durante uma leitura) e `auxes` (número e nome de cada Aux).
 
 O campo `canal` só vem nos controles que servem de modelo para criar os
 outros. `gerar:progresso`, `gerar:fim` e os erros vão só para o celular que
@@ -576,6 +713,9 @@ aí é **obrigatório** colocar o Cloudflare Access na frente.
 
 ```
 src/bridge.js        servidor HTTP + WebSocket + envio para a mesa + calibração
+src/mapa01v96.js     o mapa da 01V96: endereços, pedidos, leitura dos quadros
+src/mapa01v96-tipos.js  a tabela de endereços (gerada, não edite)
+src/atualizar.js     a atualização automática e o "atualizar agora"
 src/yamaha01v96.js   monta e lê as mensagens SysEx a partir do molde calibrado
 src/midi-io.js       abre as portas MIDI (real, virtual ou simulada)
 src/learn.js         npm run learn: a calibração pelo terminal
@@ -586,5 +726,28 @@ src/config.js        leitura e gravação do config.json e do estado.json
 public/              o app do celular (HTML, CSS, JS, manifest, service worker)
 instalar/            os instaladores de um comando (Windows e Raspberry Pi)
 systemd/             serviços para o Pi, caso queira instalar na mão
-scripts/             gerador dos ícones PNG do app
+scripts/             gerador dos ícones PNG do app e da tabela do mapa, e testes.js (npm test)
+test/                suíte rápida (a que o PC da igreja roda)
+verificacao-completa/  suíte completa, lenta, só Windows (roda aqui antes de publicar)
 ```
+
+## Créditos
+
+O mapa de endereços da 01V96 (`src/mapa01v96-tipos.js`) e o jeito de codificar
+os valores (fader de 10 bits em 4 bytes, On e caractere no último byte, nomes
+uma letra por mensagem, leitura em lotes com pausa) vêm do
+[**kryops/remote-mixer**](https://github.com/kryops/remote-mixer), de Michael
+Manzinger, sob licença MIT. O texto inteiro da licença está no cabeçalho de
+`src/mapa01v96-tipos.js`. Obrigado!
+
+A tabela foi gerada do arquivo
+`backend/src/devices/yamaha-01v96/message-types.ts`, commit `f8bb91e`, com:
+
+```bash
+node scripts/gerar-mapa01v96.js <caminho>/message-types.ts f8bb91e122f15f35801d7c71c527175706200d60
+```
+
+Ficam de fora as 12 entradas do painel HUI/Nuendo com byte acima de 127, que
+não cabem numa mensagem MIDI. Nada da tabela vem de manual oficial (a Yamaha
+não publica os endereços): por isso o bridge só escreve num endereço que
+respondeu a um pedido de leitura.

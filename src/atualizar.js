@@ -3,11 +3,15 @@
  * Atualizacao automatica do Monitor 01V96 (PC Windows da igreja).
  *
  * Roda UMA vez e sai. Quem chama e a Tarefa Agendada "Monitor 01V96", criada
- * pelo instalador, por `node iniciar.js atualizar`.
+ * pelo instalador, por `node iniciar.js atualizar`, ou o proprio bridge
+ * quando alguem pede pelo app, por `node iniciar.js atualizar --agora <id>`
+ * (veja "Modo agora" abaixo). O lancador antigo so olha o "atualizar": o
+ * "--agora" e lido aqui, de process.argv.
  *
  * Layout da instalacao (INST = %LOCALAPPDATA%\Monitor01V96 = pasta de DADOS):
  *   config.json, config.json.bak, estado.json   calibracao e mix (nunca tocados)
  *   atualizacao.json / .log / .lock, bridge.pid  estado desta atualizacao
+ *   atualizacao-agora.json                       como vai a atualizacao pedida pelo app
  *   iniciar.js                                   lancador pequeno e estavel
  *   versoes\<sha>\                               codigo + node_modules, IMUTAVEL
  *
@@ -20,13 +24,20 @@
  *   1. trava (so uma por vez);
  *   2. vigia: se o bridge esta FORA do ar (conexao recusada 2 vezes seguidas),
  *      liga. Timeout ou resposta estranha = incerto: nao mexe;
- *   3. consulta o ramo `igreja` no GitHub (no maximo a cada 6 h; falhas de
- *      rede esperam cada vez mais);
+ *   3. consulta o ramo `igreja` no GitHub (no maximo a cada 1 h; falhas de
+ *      rede esperam 30 min e depois 1 h);
  *   4. SO quando e seguro (mesa desligada e 0 celulares, ou bridge fora):
  *      baixa, extrai, instala dependencias e roda os testes em
  *      versoes\<sha>.preparando; so depois renomeia para versoes\<sha>;
  *   5. troca (tambem so quando e seguro), espera o bridge novo responder e,
  *      se nao subir, volta o ponteiro.
+ *
+ * Modo agora (`--agora`): o usuario pediu e confirmou no app. Consulta na
+ * hora (sem a janela de 1 h nem a espera de falha de rede) e prepara e troca
+ * mesmo com a mesa ligada e celulares conectados. Continua valendo todo o
+ * resto: a trava, os testes no preparo, a volta automatica se o bridge novo
+ * nao subir e as versoes recusadas. Cada fase vai para atualizacao-agora.json
+ * ({ id, fase, mensagem, em }), que o bridge le e passa para o app.
  *
  * Nada de segredo. So fala com api.github.com e codeload.github.com, por
  * HTTPS, sem seguir redirecionamento.
@@ -50,7 +61,7 @@ const ZIP_PADRAO = 'https://codeload.github.com/' + REPO;
 const HOSTS_PERMITIDOS = new Set(['api.github.com', 'codeload.github.com']);
 
 const HORA = 60 * 60 * 1000;
-const INTERVALO_CONSULTA_MS = 6 * HORA;
+const INTERVALO_CONSULTA_MS = 1 * HORA;
 const LOCK_VELHO_MS = 30 * 60 * 1000;
 const LIMITE_DOWNLOAD = 50 * 1024 * 1024;
 const LIMITE_LOG_LINHAS = 300;
@@ -77,8 +88,12 @@ const RESULTADO = {
 /** Arquivos de dados da instalacao: o atualizador nunca os copia, troca ou apaga. */
 const DADOS_PROTEGIDOS = new Set([
   'config.json', 'config.json.bak', 'estado.json',
-  'atualizacao.json', 'atualizacao.log', 'atualizacao.lock', 'bridge.pid'
+  'atualizacao.json', 'atualizacao.log', 'atualizacao.lock', 'bridge.pid',
+  'atualizacao-agora.json'
 ]);
+
+/** Fases do modo agora, na ordem (as duas ultimas encerram). */
+const FASES_AGORA = ['verificando', 'baixando', 'testando', 'trocando', 'em-dia', 'falhou'];
 
 /* ---- funcoes puras (testadas) ---------------------------------------- */
 
@@ -95,7 +110,7 @@ function deveConsultar(ultimaConsulta, agora = Date.now(), intervalo = INTERVALO
   return agora - t >= intervalo;
 }
 
-/** Espera entre consultas: 6 h normalmente; depois de falha de rede, 30 min, 1 h, 2 h, 4 h, ate 6 h. */
+/** Espera entre consultas: 1 h normalmente; depois de falha de rede, 30 min e depois 1 h. */
 function intervaloConsulta(falhas) {
   if (!(falhas > 0)) return INTERVALO_CONSULTA_MS;
   return Math.min(INTERVALO_CONSULTA_MS, 30 * 60 * 1000 * 2 ** (Math.min(falhas, 10) - 1));
@@ -280,8 +295,35 @@ function caminhos(inst) {
     log: path.join(inst, 'atualizacao.log'),
     lock: path.join(inst, 'atualizacao.lock'),
     pid: path.join(inst, 'bridge.pid'),
-    versoes: path.join(inst, 'versoes')
+    versoes: path.join(inst, 'versoes'),
+    agora: path.join(inst, 'atualizacao-agora.json')
   };
+}
+
+/**
+ * Modo agora: grava a fase em atualizacao-agora.json (tmp + rename) para o
+ * bridge contar ao app. Mensagem curta e fixa: nunca caminho nem erro cru.
+ * Sem modo agora, nao faz nada.
+ */
+function marcarAgora(c, agora, fase, mensagem) {
+  if (!agora || !FASES_AGORA.includes(fase)) return;
+  if (agora.final) return; // ja contou como terminou
+  if (fase === 'em-dia' || fase === 'falhou') agora.final = true;
+  try {
+    const tmp = c.agora + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ id: agora.id, fase, mensagem: String(mensagem).slice(0, 200), em: new Date().toISOString() }) + '\n');
+    // No Windows o rename falha por um instante se o bridge esta lendo o arquivo.
+    for (let tentativa = 1; ; tentativa++) {
+      try {
+        fs.renameSync(tmp, c.agora);
+        break;
+      } catch (erro) {
+        if (!['EPERM', 'EBUSY', 'EACCES'].includes(erro.code) || tentativa >= 20) throw erro;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    }
+  } catch { /* o app so deixa de ver o andamento; a atualizacao segue */ }
+  registrar(c, 'agora: ' + fase + ' - ' + mensagem);
 }
 
 const dirVersao = (c, sha) => path.join(c.versoes, sha);
@@ -621,14 +663,18 @@ function semBom(texto) {
 }
 
 /**
- * Liga o bridge (`node iniciar.js`) sem janela e FORA da Tarefa Agendada: o
- * Agendador encerra os processos filhos da tarefa quando ela termina, e o
- * bridge precisa continuar. No Windows isso se faz criando o processo pelo
- * WMI (o pai passa a ser o servico do WMI). Se o WMI falhar, cai no spawn comum.
+ * Liga `node iniciar.js <argumentos>` sem janela e FORA da arvore de
+ * processos de quem chama: o Agendador encerra os filhos da tarefa quando ela
+ * termina, e o bridge precisa continuar; e o atualizador pedido pelo app para
+ * o bridge que o chamou, entao nao pode ser filho dele. No Windows isso se faz
+ * criando o processo pelo WMI (o pai passa a ser o servico do WMI). Se o WMI
+ * falhar, cai no spawn comum (destacado). Os argumentos sao so palavras
+ * simples (atualizar, --agora, id hexadecimal). Devolve true se abriu.
  */
-async function ligarBridge(c) {
+async function lancarSolto(c, argumentos = []) {
+  if (!argumentos.every((a) => /^[A-Za-z0-9-]+$/.test(a))) throw new Error('argumento invalido');
   if (process.platform === 'win32') {
-    const linha = '"' + process.execPath + '" "' + c.iniciar + '"';
+    const linha = ['"' + process.execPath + '"', '"' + c.iniciar + '"', ...argumentos].join(' ');
     const r = await rodar(powershellExe(), [
       '-NoProfile', '-NonInteractive', '-Command',
       '$ErrorActionPreference = "Stop"; try { ' +
@@ -637,17 +683,38 @@ async function ligarBridge(c) {
       'if ($r -and $r.ReturnValue -eq 0 -and $r.ProcessId) { exit 0 } else { exit 90 } ' +
       '} catch { exit 91 }'
     ], { timeout: 30000, env: { MONITOR_LINHA: linha, MONITOR_PASTA: c.inst } });
-    if (r.codigo === 0) return;
+    if (r.codigo === 0) return true;
     registrar(c, 'WMI nao ligou o programa (' + r.codigo + '); tentando o modo comum');
   }
-  const filho = spawn(process.execPath, [c.iniciar], {
-    cwd: c.inst,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true
-  });
-  filho.on('error', () => { /* o status mostra se subiu */ });
-  filho.unref();
+  try {
+    const filho = spawn(process.execPath, [c.iniciar, ...argumentos], {
+      cwd: c.inst,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    filho.on('error', () => { /* o status mostra se subiu */ });
+    filho.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Liga o bridge (`node iniciar.js`), solto. */
+async function ligarBridge(c) {
+  await lancarSolto(c);
+}
+
+/**
+ * Chamado pelo bridge (atualizar:agora): abre `node iniciar.js atualizar
+ * --agora <id>` solto, como a vigia liga o bridge. Devolve true se abriu.
+ */
+async function lancarAgora(inst, id) {
+  const c = caminhos(path.resolve(inst));
+  if (!fs.existsSync(c.iniciar)) return false;
+  if (typeof id !== 'string' || !/^[0-9a-f]{16}$/.test(id)) throw new Error('id invalido');
+  return lancarSolto(c, ['atualizar', '--agora', id]);
 }
 
 async function esperarBridge(porta, ms) {
@@ -767,7 +834,7 @@ function baixarPrioridade(baixa) {
  * renomeia para versoes\<sha>. Lanca ErroDefinitivo quando a versao e ruim;
  * qualquer outro erro e transitorio.
  */
-async function preparar(c, sha, aindaSeguro) {
+async function preparar(c, sha, aindaSeguro, aoTestar = () => {}) {
   const dest = dirVersao(c, sha);
   const prep = dest + '.preparando';
   const ext = dest + '.extraindo';
@@ -820,6 +887,7 @@ async function preparar(c, sha, aindaSeguro) {
     const ambienteTeste = { MONITOR_DADOS: dadosTeste, MONITOR_INSTALACAO: null };
     try {
       if (!(await aindaSeguro())) throw new ErroAdiado('deixou de ser seguro');
+      aoTestar();
       registrar(c, 'instalando dependencias de ' + sha.slice(0, 7));
       const npm = comandoNpm(['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--loglevel=error']);
       if (!npm) throw erroDeRede(new Error('npm nao encontrado neste computador'));
@@ -886,9 +954,10 @@ function bridgeMorreu(c, desde) {
 
 /**
  * Troca para e.preparada. Devolve 'aplicada' | 'adiada' | 'falhou-definitiva' |
- * 'falhou-transitoria'.
+ * 'falhou-transitoria'. forcar (modo agora): o usuario pediu no app, entao
+ * nao espera a mesa desligar nem os celulares sairem.
  */
-async function aplicar(c, e, porta) {
+async function aplicar(c, e, porta, forcar = false) {
   const sha = e.preparada;
   if (sha === e.atual) {
     // ja e a versao em uso (ex.: troca anterior terminou apos uma queda)
@@ -902,7 +971,7 @@ async function aplicar(c, e, porta) {
     return 'adiada';
   }
   // Confere de novo logo antes de parar o bridge: um celular pode ter entrado.
-  if (!seguroAplicar(statusDaSondagem(await sondar(c, porta)))) return 'adiada';
+  if (!forcar && !seguroAplicar(statusDaSondagem(await sondar(c, porta)))) return 'adiada';
 
   const de = e.atual;
   const anteriorAntes = e.anterior;
@@ -1020,8 +1089,12 @@ async function vigiar(c, e, porta) {
   return s;
 }
 
-async function consultar(c, e) {
-  if (!deveConsultar(e.ultimaConsulta, Date.now(), intervaloConsulta(e.falhasRede))) return;
+/**
+ * Consulta o sha do ramo. forcar (modo agora) ignora a janela de 1 h e a
+ * espera depois de falha de rede. Devolve 'pulou' | 'falhou' | 'ok'.
+ */
+async function consultar(c, e, forcar = false) {
+  if (!forcar && !deveConsultar(e.ultimaConsulta, Date.now(), intervaloConsulta(e.falhasRede))) return 'pulou';
   let sha;
   try {
     sha = await consultarShaRemoto();
@@ -1031,10 +1104,16 @@ async function consultar(c, e) {
     e.ultimoResultado = erro.limite ? RESULTADO.limiteApi : RESULTADO.semRede;
     registrar(c, (erro.limite ? 'limite da API: ' : 'sem consulta: ') + erro.message);
     gravarEstado(c, e);
-    return;
+    return 'falhou';
   }
   e.falhasRede = 0;
   e.ultimaConsulta = new Date().toISOString();
+  // Versao preparada que nao e mais a do ramo (o dono tirou do `igreja` ou
+  // publicou outra): nunca e aplicada.
+  if (e.preparada && e.preparada !== sha) {
+    registrar(c, 'versao preparada ' + e.preparada.slice(0, 7) + ' nao e mais a do ramo; descartada');
+    e.preparada = null;
+  }
   if (sha === e.atual) {
     e.alvo = null;
     if (!e.preparada) e.ultimoResultado = RESULTADO.emDia;
@@ -1045,13 +1124,35 @@ async function consultar(c, e) {
     e.alvo = sha;
   }
   gravarEstado(c, e);
+  return 'ok';
 }
 
-async function executar(inst) {
+/** Texto curto para o app quando o modo agora termina sem trocar (nunca caminho nem erro cru). */
+function textoDoFim(e) {
+  if (e.ultimoResultado === RESULTADO.semRede) return 'Sem internet no PC da mesa (ou o GitHub nao respondeu). Tente de novo mais tarde.';
+  if (e.ultimoResultado === RESULTADO.limiteApi) return 'O GitHub pediu para esperar. Tente de novo daqui a uma hora.';
+  if (e.ultimoResultado === RESULTADO.recusada) return 'A versao nova foi recusada (os testes dela falharam). O programa continua na versao atual.';
+  if (e.ultimoResultado === RESULTADO.falhaPreparo) return 'Nao consegui preparar a versao nova. O programa continua na versao atual; tente de novo.';
+  if (e.ultimoResultado === RESULTADO.voltou) return 'A versao nova nao subiu; voltei para a anterior.';
+  if (e.ultimoResultado === RESULTADO.soWindows) return 'A atualizacao pelo app so existe no Windows.';
+  return 'A atualizacao terminou sem trocar de versao. O programa continua na versao atual.';
+}
+
+/**
+ * Uma execucao. opcoes.agora = { id } (modo agora, pedido pelo app): consulta
+ * na hora e nao espera a mesa desligar; o resto (trava, testes, volta,
+ * recusadas) vale igual.
+ */
+async function executar(inst, opcoes = {}) {
+  const agora = opcoes.agora ? { id: opcoes.agora.id || null, final: false } : null;
   const c = caminhos(inst);
   // So age em cima de uma instalacao de verdade (tem o lancador).
   if (!fs.existsSync(inst) || !fs.existsSync(c.iniciar)) return 'sem-instalacao';
-  if (!(await pegarTrava(c))) return 'ocupado';
+  marcarAgora(c, agora, 'verificando', 'Procurando versao nova.');
+  if (!(await pegarTrava(c))) {
+    marcarAgora(c, agora, 'falhou', 'Ja tem uma atualizacao rodando neste PC. Tente de novo em alguns minutos.');
+    return 'ocupado';
+  }
 
   try {
     const porta = lerPorta(c);
@@ -1060,24 +1161,38 @@ async function executar(inst) {
       await vigiar(c, e, porta);
       limparVersoes(c, e);
 
-      await consultar(c, e);
+      const consulta = await consultar(c, e, Boolean(agora));
+      if (agora && consulta === 'ok' && !e.alvo && !e.preparada) {
+        if (e.ultimoResultado === RESULTADO.emDia) {
+          marcarAgora(c, agora, 'em-dia', 'Ja esta na versao mais nova (' + String(e.atual).slice(0, 7) + ').');
+        }
+      }
 
-      // Preparar: so quando e seguro (nada de CPU pesada nem codigo novo durante o culto).
-      if (e.alvo && e.alvo !== e.preparada && e.alvo !== e.atual) {
-        const esperaRede = e.falhasRede > 0 && !deveConsultar(e.ultimaConsulta, Date.now(), intervaloConsulta(e.falhasRede));
-        const sondagem = await sondar(c, porta);
+      // Modo agora: so prepara ou aplica o que a consulta de AGORA confirmou
+      // como a versao do ramo (sem consulta, nada; o fim avisa o motivo).
+      const podeSeguir = !agora || consulta === 'ok';
+
+      // Preparar: so quando e seguro (nada de CPU pesada nem codigo novo
+      // durante o culto), a nao ser que o usuario tenha pedido agora.
+      if (podeSeguir && e.alvo && e.alvo !== e.preparada && e.alvo !== e.atual) {
+        const esperaRede = !agora && e.falhasRede > 0 && !deveConsultar(e.ultimaConsulta, Date.now(), intervaloConsulta(e.falhasRede));
+        const sondagem = agora ? null : await sondar(c, porta);
         if (esperaRede) {
           // acabou de falhar a rede: espera a janela
         } else if (process.platform !== 'win32') {
           e.ultimoResultado = RESULTADO.soWindows;
           registrar(c, 'atualizacao automatica so no Windows');
-        } else if (!seguroAplicar(statusDaSondagem(sondagem))) {
+        } else if (!agora && !seguroAplicar(statusDaSondagem(sondagem))) {
           e.ultimoResultado = RESULTADO.esperandoSeguro;
           registrar(c, 'versao ' + e.alvo.slice(0, 7) + ' achada; espero a mesa desligada e ninguem conectado para preparar');
         } else {
           const sha = e.alvo;
+          if (agora) registrar(c, 'pedido pelo app (agora): preparo ' + sha.slice(0, 7) + ' sem esperar a mesa desligar');
+          marcarAgora(c, agora, 'baixando', 'Baixando a versao ' + sha.slice(0, 7) + '.');
           try {
-            await preparar(c, sha, async () => seguroAplicar(statusDaSondagem(await sondar(c, porta))));
+            await preparar(c, sha,
+              agora ? async () => true : async () => seguroAplicar(statusDaSondagem(await sondar(c, porta))),
+              () => marcarAgora(c, agora, 'testando', 'Testando a versao ' + sha.slice(0, 7) + ' antes de trocar.'));
             e.preparada = sha;
             delete e.tentativas[sha];
             registrar(c, 'versao ' + sha.slice(0, 7) + ' preparada');
@@ -1103,27 +1218,39 @@ async function executar(inst) {
         gravarEstado(c, e);
       }
 
-      // Aplicar: so quando e seguro.
-      if (e.preparada) {
+      // Aplicar: so quando e seguro (ou pedido agora).
+      if (podeSeguir && e.preparada) {
         const sha = e.preparada;
         if (e.recusadas.includes(sha)) {
           e.preparada = null;
-        } else if (!seguroAplicar(statusDaSondagem(await sondar(c, porta)))) {
+        } else if (!agora && !seguroAplicar(statusDaSondagem(await sondar(c, porta)))) {
           registrar(c, 'versao ' + sha.slice(0, 7) + ' pronta; espero a mesa desligada e ninguem conectado');
           e.ultimoResultado = RESULTADO.esperando;
         } else {
-          const r = await aplicar(c, e, porta);
-          if (r === 'aplicada') e.ultimoResultado = 'atualizado para ' + sha.slice(0, 7);
-          else if (r === 'adiada') e.ultimoResultado = RESULTADO.esperando;
-          else {
-            registrarFalha(e, sha, r === 'falhou-definitiva');
+          marcarAgora(c, agora, 'trocando', 'Trocando para a versao ' + sha.slice(0, 7) + '. O app reconecta sozinho.');
+          const r = await aplicar(c, e, porta, Boolean(agora));
+          if (r === 'aplicada') {
+            e.ultimoResultado = 'atualizado para ' + sha.slice(0, 7);
+            marcarAgora(c, agora, 'em-dia', 'Atualizado para a versao ' + sha.slice(0, 7) + '.');
+          } else if (r === 'adiada') {
+            e.ultimoResultado = RESULTADO.esperando;
+            marcarAgora(c, agora, 'falhou', 'Nao consegui trocar agora (o programa nao parou). Tente de novo.');
+          } else {
+            // Pedida pelo app, a versao que nao subiu e recusada na primeira
+            // vez: o usuario nao fica tentando de novo uma versao quebrada.
+            registrarFalha(e, sha, agora ? true : r === 'falhou-definitiva');
             e.ultimoResultado = RESULTADO.voltou;
           }
         }
         gravarEstado(c, e);
       }
+      if (agora && !agora.final) {
+        marcarAgora(c, agora, e.ultimoResultado === RESULTADO.emDia ? 'em-dia' : 'falhou',
+          e.ultimoResultado === RESULTADO.emDia ? 'Ja esta na versao mais nova.' : textoDoFim(e));
+      }
     } catch (erro) {
       registrar(c, 'erro inesperado: ' + (erro && erro.message));
+      marcarAgora(c, agora, 'falhou', 'Algo deu errado na atualizacao. O programa continua na versao que estava.');
       // A vigia ja rodou; se um erro derrubou o bridge no meio de uma troca, religa.
       try {
         if (e.emTroca) {
@@ -1143,6 +1270,19 @@ async function executar(inst) {
   }
 }
 
+/**
+ * `node iniciar.js atualizar --agora [id]` -> { agora: { id } }. O id (16
+ * hexadecimais) e o que o bridge procura em atualizacao-agora.json; sem ele
+ * o modo agora funciona do mesmo jeito.
+ */
+function opcoesDaLinha(argv) {
+  const args = Array.isArray(argv) ? argv.slice(2) : [];
+  const i = args.indexOf('--agora');
+  if (i < 0) return {};
+  const id = typeof args[i + 1] === 'string' && /^[0-9a-f]{16}$/.test(args[i + 1]) ? args[i + 1] : null;
+  return { agora: { id } };
+}
+
 async function main() {
   let inst = process.env.MONITOR_INSTALACAO ? path.resolve(process.env.MONITOR_INSTALACAO) : null;
   if (!inst) {
@@ -1152,7 +1292,7 @@ async function main() {
   }
   if (!inst) return 'sem-instalacao';
   try {
-    return await executar(inst);
+    return await executar(inst, opcoesDaLinha(process.argv));
   } catch (erro) {
     try { registrar(caminhos(inst), 'erro inesperado: ' + (erro && erro.message)); } catch { /* ignora */ }
     return 'erro';
@@ -1167,7 +1307,10 @@ if (require.main === module) {
 
 module.exports = {
   DADOS_PROTEGIDOS,
+  FASES_AGORA,
   RESULTADO,
+  opcoesDaLinha,
+  lancarAgora,
   shaValido,
   deveConsultar,
   intervaloConsulta,

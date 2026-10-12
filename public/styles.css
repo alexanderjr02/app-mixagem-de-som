@@ -1,37 +1,72 @@
 /* ---------------------------------------------------------------------------
-   Monitor 01V96
-   Tema escuro monocromatico. Sem gradiente e sem cor de enfeite: no palco o
-   que importa e bater o olho e saber onde esta cada fader.
+   Monitor 01V96 - "Cabine escura"
+   Com tudo certo, o painel fica quieto; so acende o que pede atencao. Uma cor
+   so de sinal: ambar = olhe aqui (mudo ligado, mesa falhou, sem conexao).
+   Nada pisca, nada de pilula, raio de ate 3 px.
    --------------------------------------------------------------------------- */
 
+/* Fontes hospedadas aqui (o Wi-Fi da igreja pode nao ter internet).
+   Trocar a fonte = trocar os arquivos em fonts/ e os tokens --texto e --numero.
+   Palavras em Archivo Narrow; numeros em Barlow Semi Condensed, tabular. */
+@font-face {
+  font-family: "Archivo Narrow";
+  src: url("fonts/archivo-narrow.woff2") format("woff2");
+  font-weight: 500 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow Semi Condensed";
+  src: url("fonts/barlow-semi-condensed-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Barlow Semi Condensed";
+  src: url("fonts/barlow-semi-condensed-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  --fundo: #0a0a0c;
-  --superficie: #131317;
-  --superficie-2: #1b1b20;
-  --superficie-3: #24242b;
-  --linha: #2a2a32;
-  --linha-forte: #3d3d47;
+  --painel: #0B0C0D;      /* fundo */
+  --chassi: #131518;      /* faixa, mestre, trilho lateral, aviso */
+  --chassi-2: #1A1D21;    /* tecla mudo desligada, fone atual, botoes */
+  --chassi-3: #23272C;    /* pressionado */
+  --sulco: #050606;       /* fenda do fader, janela do valor */
+  --linha: #262A2F;
+  --linha-2: #3A3F46;
+  --marca-forte: #646B72; /* marcas 0, 50 e 100 */
+  --tinta: #E4E6E1;
+  --tinta-2: #A9AFB3;
+  --tinta-3: #868C91;
+  --tampa: #CDD1CB;
+  --ambar: #F2A93B;       /* a unica cor de sinal */
+  --ambar-tinta: #1B1305;
+  --ambar-fundo: #2A1F0C;
 
-  --texto: #f6f6f8;
-  --texto-2: #adadb8;
-  --texto-3: #7a7a86;
+  --texto: "Archivo Narrow", "Arial Narrow", sans-serif;
+  /* Numeros com algarismos tabulares: o valor nao treme a cada passo. */
+  --numero: "Barlow Semi Condensed", "Archivo Narrow", sans-serif;
 
-  --largura-fader: 62px;
-  --largura-mestre: 80px;
-  --punho: 32px;
-  --vao: 6px;
-
-  --raio-g: 20px;
-  --raio-m: 12px;
-  --raio-p: 9px;
+  --margem: 12px;
+  --faixa: 52px;
+  --mestre: 78px;
+  --tampa-a: 24px;
+  --trilho-min: 144px;    /* tampa de 24 + curso util de 120 */
+  --raio: 3px;
+  --raio-p: 2px;
 
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 
-/* Sem isto, qualquer classe com "display" vence o atributo hidden e o elemento
-   continua na tela. Vale para as etapas do assistente e para o aviso de vazio. */
+/* Sem isto, qualquer classe com "display" vence o atributo hidden. */
 [hidden] { display: none !important; }
 
 html, body {
@@ -41,20 +76,20 @@ html, body {
   overscroll-behavior: none;
 }
 
+/* A pagina nunca rola de lado: so as faixas rolam, dentro de .canais. */
 body {
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  /* minmax(0,...) nas duas direcoes: sem isso a faixa de canais empurraria a
-     pagina inteira para o lado em vez de rolar dentro da propria faixa. */
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: "comando" "palco" "rodape";
   height: 100dvh;
   overflow: hidden;
-  background: var(--fundo);
-  color: var(--texto);
-  font-family: -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  background: var(--painel);
+  color: var(--tinta);
+  font-family: var(--texto);
   font-size: 15px;
-  line-height: 1.45;
-  letter-spacing: -0.01em;
+  font-weight: 500;
+  line-height: 1.4;
   touch-action: manipulation;
   -webkit-font-smoothing: antialiased;
   -webkit-tap-highlight-color: transparent;
@@ -62,499 +97,1004 @@ body {
   -webkit-user-select: none;
 }
 
-button, input, select { font-family: inherit; }
+button, input, select { font: inherit; color: inherit; }
 
-/* ------------------------------- topo ------------------------------------ */
-
-.topo {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 11px 14px;
-  padding-top: calc(11px + env(safe-area-inset-top));
-  padding-left: calc(14px + env(safe-area-inset-left));
-  padding-right: calc(14px + env(safe-area-inset-right));
-  background: rgba(19, 19, 23, 0.86);
-  -webkit-backdrop-filter: saturate(140%) blur(14px);
-  backdrop-filter: saturate(140%) blur(14px);
-  border-bottom: 1px solid var(--linha);
+button:focus-visible,
+summary:focus-visible,
+select:focus-visible,
+[role="slider"]:focus-visible {
+  outline: 2px solid var(--tinta);
+  outline-offset: 2px;
 }
 
-.marca {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-}
-
-.marca__icone {
-  width: 19px;
-  height: 19px;
-  flex: none;
-  align-self: center;
-  fill: none;
-  stroke: var(--texto);
-  stroke-width: 1.4;
-  stroke-linecap: round;
-}
-
-.marca__icone rect {
-  fill: var(--texto);
-  stroke: none;
-}
-
-.marca__texto {
-  font-size: 16px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-}
-
-.marca__sub {
-  font-size: 10px;
+/* Todo numero que e dado: valor, cena, Aux, canal, contagem, progresso. */
+.n {
+  font-family: var(--numero);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
   font-weight: 600;
-  color: var(--texto-3);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
-/* Cena da mesa, colada na marca. E a unica coisa do topo que encolhe: o app.js
-   tenta "Cena 3 · Pedro", depois tira o "01V96" e por fim encurta para "C3".
-   O nome corta com reticencias so em ultimo caso. */
-.cena {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  overflow: hidden;
-  margin-left: 2px;
-  padding-left: 10px;
-  border-left: 1px solid var(--linha-forte);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0;
-  color: var(--texto-2);
+/* Legenda em caixa alta: so ate 12 px. */
+.legenda {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tinta-3);
   white-space: nowrap;
 }
 
-.cena__numero {
-  flex: none;
-  color: var(--texto);
-  font-variant-numeric: tabular-nums;
+.legenda .n {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tinta-2);
 }
 
-.cena__ponto {
-  flex: none;
-  color: var(--texto-3);
+/* ------------------------------ comando ---------------------------------- */
+
+/* Retrato: o comando fica em cima, sem caixas. A hierarquia vem de tamanho e
+   tom: fone > cena; a mesa so aparece quando ha algo. */
+.comando {
+  grid-area: comando;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "fone ajustes"
+    "cena cena"
+    "passageiro passageiro"
+    "aviso aviso"
+    "abas lendo";
+  column-gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top)) calc(var(--margem) + env(safe-area-inset-right)) 0 calc(var(--margem) + env(safe-area-inset-left));
 }
 
-.cena__nome {
+.fone {
+  grid-area: fone;
+  justify-self: start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fone--plano { cursor: default; }
+
+.fone__nome {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.fone__nome > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.cena__letra { display: none; }
-
-.topo[data-cena="compacta"] .marca__sub,
-.topo[data-cena="curta"] .marca__sub { display: none; }
-
-.topo[data-cena="curta"] .cena__letra { display: inline; }
-
-/* Some da tela, mas o leitor de tela continua lendo "Cena 3". */
-.topo[data-cena="curta"] .cena__palavra {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
   white-space: nowrap;
 }
 
-/* A equipe de som trocou de cena: o rotulo pisca uma vez, sem som e sem
-   tomar a tela. O texto do que aconteceu fica no rodape. */
-.cena--trocou { animation: pulsar 1.1s ease-in-out 1; }
-
-.topo__acoes {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+.fone__nome svg {
+  width: 14px;
+  height: 14px;
   flex: none;
+  margin-top: 3px;
+  fill: none;
+  stroke: var(--tinta-3);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.conexao {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 13px 0 11px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: 999px;
-  color: var(--texto-2);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0;
-  cursor: pointer;
-}
+.fone:active .fone__nome { color: var(--tinta-2); }
 
-.conexao:active { background: var(--superficie-3); }
-
-.conexao__ponto {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--texto-3);
-  flex: none;
-}
-
-body[data-conexao="online"] .conexao__ponto {
-  background: var(--texto);
-  box-shadow: 0 0 0 3px rgba(246, 246, 248, 0.14);
-}
-
-body[data-conexao="online"] .conexao__texto { color: var(--texto); }
-
-body[data-conexao="offline"] .conexao__ponto,
-body[data-conexao="ligando"] .conexao__ponto {
-  background: transparent;
-  border: 1.5px solid var(--texto-2);
-  animation: pulsar 1.2s ease-in-out infinite;
-}
-
-@keyframes pulsar {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.2; }
-}
-
-.icone-botao {
+/* Engrenagem sem moldura, 44 x 44. */
+.ajustes {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  gap: 8px;
+  width: 44px;
+  height: 44px;
   padding: 0;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: 999px;
+  border: 0;
+  background: none;
+  color: var(--tinta-2);
   cursor: pointer;
 }
 
-.icone-botao:active { background: var(--superficie-3); }
-
-.icone-botao:disabled { opacity: 0.4; cursor: default; }
-
-.icone-botao--apagado { opacity: 0.45; }
-
-.icone-botao svg {
-  width: 16px;
-  height: 16px;
+.ajustes svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
   fill: none;
-  stroke: var(--texto-2);
+  stroke: var(--tinta-2);
   stroke-width: 1.6;
   stroke-linecap: round;
-  stroke-linejoin: round;
+}
+
+.ajustes span { display: none; }
+
+.comando > .ajustes {
+  grid-area: ajustes;
+  align-self: start;
+  justify-self: end;
+  margin-right: -10px;
+}
+
+/* Cena: secundaria. Na troca, vira uma etiqueta invertida por 600 ms e volta
+   em 400 ms, uma vez so. */
+.cena {
+  grid-area: cena;
+  margin: 2px 0 0;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--tinta-2);
+  white-space: nowrap;
+}
+
+.cena__rotulo {
+  display: inline-block;
+  max-width: calc(100% + 6px);
+  margin-left: -6px;
+  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  border-radius: var(--raio-p);
+  transition: background-color 400ms ease-out, color 400ms ease-out;
+}
+
+.cena .n { font-size: 14px; font-weight: 600; }
+
+.cena--invertida .cena__rotulo {
+  background-color: var(--tinta);
+  color: var(--painel);
+  transition: none;
+}
+
+/* Aviso passageiro: so quando o rodape nao aparece (paisagem, retrato baixo). */
+.passageiro {
+  grid-area: passageiro;
+  display: none;
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--tinta);
+}
+
+/* ---- mesa: so aparece quando ha algo -------------------------------------- */
+
+.aviso { grid-area: aviso; }
+
+/* Lendo: na linha das abas, a direita, com um fio do tamanho do progresso. */
+.aviso--lendo {
+  grid-area: lendo;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  margin-top: 6px;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--tinta-2);
+  white-space: nowrap;
+}
+
+.aviso--lendo .n { font-size: 13px; color: var(--tinta); }
+
+.aviso__fio {
+  display: block;
+  height: 2px;
+  background: var(--linha);
+}
+
+.aviso__fio i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--tinta-2);
+  transition: width 200ms ease-out;
+}
+
+.aviso--lendo[data-sem-fio] .aviso__fio { display: none; }
+
+/* Falhou, sem conexao: borda ambar de 3 px. */
+.aviso--alerta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--chassi);
+  border-left: 3px solid var(--ambar);
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--tinta);
+  animation: aparecer 160ms ease-out;
+}
+
+.aviso__titulo {
+  font-weight: 700;
+  color: var(--ambar);
+}
+
+.aviso__curto { display: none; }
+
+.aviso__acao {
+  width: 100%;
+  min-height: 44px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--linha-2);
+  border-radius: var(--raio);
+  background: var(--chassi-2);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--tinta);
+  cursor: pointer;
+}
+
+.aviso__acao:active { background: var(--chassi-3); }
+
+@keyframes aparecer {
+  from { opacity: 0; }
+}
+
+/* Abas do filtro: coladas nas faixas, sem caixa; sublinhado de 2 px. */
+.abas {
+  grid-area: abas;
+  display: flex;
+  gap: 22px;
+  margin-top: 4px;
+}
+
+.abas button {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--tinta-3);
+  white-space: nowrap;
+  box-shadow: inset 0 -2px 0 transparent;
+  cursor: pointer;
+}
+
+.abas button[aria-pressed="true"] {
+  color: var(--tinta);
+  box-shadow: inset 0 -2px 0 var(--tinta);
+}
+
+.abas .n {
+  margin-left: 6px;
+  font-size: 14px;
+  color: var(--tinta-3);
+}
+
+.abas button[aria-pressed="true"] .n { color: var(--tinta-2); }
+
+.comando__voltar {
+  grid-area: abas;
+  justify-self: start;
+  margin: 8px 0 10px;
 }
 
 /* ------------------------------ palco ------------------------------------ */
 
 .palco {
+  grid-area: palco;
   position: relative;
   display: flex;
   min-height: 0;
   min-width: 0;
+  border-top: 1px solid var(--linha);
 }
 
-/* Sem bridge, os faders ficam apagados e travados: mexer neles nao mudaria
-   nada no seu fone, e pior, daria a impressao de que mudou. */
-body[data-conexao="offline"] .canais,
-body[data-conexao="offline"] .mestre,
-body[data-conexao="ligando"] .canais,
-body[data-conexao="ligando"] .mestre {
-  opacity: 0.2;
-  pointer-events: none;
+/* overflow hidden: a pista da tampa anda por transform e passaria da borda do
+   volume geral; sem o corte, a pagina ganharia rolagem vertical. */
+.mesa {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .canais {
   flex: 1;
   min-width: 0;
   display: flex;
-  gap: var(--vao);
-  padding: 14px 10px;
-  padding-left: calc(10px + env(safe-area-inset-left));
+  gap: 2px;
+  padding: 8px 6px 10px calc(var(--margem) + env(safe-area-inset-left));
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+  overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
 }
 
 .canais::-webkit-scrollbar { display: none; }
 
-.mestre {
-  flex: none;
-  display: flex;
-  padding: 14px 10px;
-  padding-right: calc(10px + env(safe-area-inset-right));
-  background: var(--superficie);
-  border-left: 1px solid var(--linha);
-}
-
-/* ------------------------------ fader ------------------------------------ */
-
-.fader {
-  --v: 0;
-  flex: none;
-  width: var(--largura-fader);
+/* "Só com som" sem nenhum canal: no lugar das faixas, com o caminho de volta. */
+.canais__nenhum {
+  flex: 1;
+  align-self: center;
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  min-height: 0;
-}
-
-.mestre .fader { width: var(--largura-mestre); }
-
-.fader__valor {
+  align-items: center;
+  gap: 12px;
+  margin-right: 6px;
+  padding: 18px 14px;
+  border: 1px dashed var(--linha-2);
+  border-radius: var(--raio);
+  font-size: 15px;
+  color: var(--tinta-2);
   text-align: center;
-  font-size: 16px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
-  color: var(--texto);
 }
 
-.fader__trilho {
+.canais__nenhum p { margin: 0; max-width: 26ch; }
+
+.mestre {
+  flex: none;
+  width: calc(var(--mestre) + env(safe-area-inset-right));
+  display: flex;
+  padding: 8px 8px 10px;
+  padding-right: calc(8px + env(safe-area-inset-right));
+  background: var(--chassi);
+  border-left: 1px solid var(--linha-2);
+  --tampa-a: 28px;
+}
+
+/* ------------------------------ faixa ------------------------------------ */
+
+.faixa {
+  --v: 0;
+  --antes: 0;
+  flex: none;
+  width: var(--faixa);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  background: var(--chassi);
+  border-radius: var(--raio-p);
+  transition: opacity 160ms ease-out;
+}
+
+.faixa__cabeca {
+  min-height: 46px;
+  padding: 0 2px;
+  text-align: center;
+}
+
+.faixa__num {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--tinta-3);
+}
+
+/* Nome em ate 2 linhas. O app.js diminui de 0,5 em 0,5 px (ate 12) quando uma
+   palavra nao cabe, e so depois quebra. */
+.faixa__nome {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.faixa__nome--sem {
+  font-weight: 500;
+  color: var(--tinta-2);
+}
+
+.faixa__nome--sem .n { font-size: 13px; }
+
+/* Janela do valor: so o 0-100 que existe. */
+.faixa__valor {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  margin: 0 4px;
+  background: var(--sulco);
+  border: 1px solid var(--linha);
+  border-radius: var(--raio-p);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Trilho: a area de toque e o trilho inteiro. Na vertical o dedo mexe o fader;
+   na horizontal o navegador rola as faixas. */
+.faixa__trilho {
   position: relative;
   flex: 1;
-  min-height: 140px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: var(--raio-m);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.5);
-  touch-action: none;
+  min-height: var(--trilho-min);
+  touch-action: pan-x;
   cursor: grab;
-  overflow: hidden;
 }
 
-.fader__trilho:focus-visible {
-  outline: 2px solid var(--texto);
-  outline-offset: 2px;
-}
+.faixa[data-arrastando="1"] .faixa__trilho { cursor: grabbing; }
 
-.fader[data-arrastando="1"] .fader__trilho {
-  border-color: var(--linha-forte);
-  cursor: grabbing;
-}
-
-.fader__marca {
+.faixa__curso {
   position: absolute;
+  top: calc(var(--tampa-a) / 2);
+  bottom: calc(var(--tampa-a) / 2);
   left: 0;
   right: 0;
-  height: 1px;
-  background: #34343e;
 }
 
-.fader__nivel {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: calc(var(--punho) / 2 + var(--v) * (100% - var(--punho)));
-  /* Precisa dar para ver o nivel de longe, sem precisar ler o numero. */
-  background: #303039;
-  border-top: 1px solid #50505d;
-}
-
-.fader__punho {
+.marca {
   position: absolute;
   left: 4px;
   right: 4px;
-  height: var(--punho);
-  bottom: calc(var(--v) * (100% - var(--punho)));
-  background: var(--texto);
-  border-radius: 8px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
-  transition: background 0.15s ease;
+  height: 1px;
+  transform: translateY(50%);
 }
 
-.fader__risco {
-  width: 46%;
-  height: 1.5px;
-  border-radius: 1px;
-  background: var(--fundo);
-  opacity: 0.35;
+.marca::before,
+.marca::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 7px;
+  height: 1px;
+  background: var(--linha-2);
 }
 
-.fader__risco + .fader__risco { opacity: 0.35; }
+.marca::before { left: 3px; }
+.marca::after { right: 3px; }
 
-.fader__mudo {
-  height: 30px;
-  padding: 0;
-  border: 1px solid var(--linha);
+.marca--forte::before,
+.marca--forte::after {
+  width: 11px;
+  background: var(--marca-forte);
+}
+
+.marca--forte::before { left: 0; }
+.marca--forte::after { right: 0; }
+
+.faixa__fenda {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 4px;
+  margin-left: -2px;
+  background: var(--sulco);
+  box-shadow: 0 0 0 1px var(--linha);
+}
+
+/* Nivel: linha de 2 px da base ao centro da tampa. */
+.faixa__nivel {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;
+  background: var(--tinta-3);
+  transform-origin: 50% 100%;
+  transform: scaleY(var(--v));
+}
+
+/* A tampa anda por transform: o deslize da troca de cena so mexe nisso. */
+.faixa__pista {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(100% - var(--tampa-a));
+  transform: translateY(calc((1 - var(--v)) * 100%));
+  pointer-events: none;
+}
+
+.faixa__tampa {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 38px;
+  height: var(--tampa-a);
+  margin-left: -19px;
+  background: var(--tampa);
   border-radius: var(--raio-p);
-  background: var(--superficie-2);
-  color: var(--texto-3);
-  font-size: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.7);
+}
+
+.faixa__tampa::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: var(--painel);
+}
+
+/* Toque: etiqueta invertida acima da tampa, seguindo o dedo 1:1. */
+.faixa__etiqueta {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  z-index: 3;
+  padding: 3px 6px;
+  border-radius: var(--raio-p);
+  background: var(--tinta);
+  color: var(--painel);
+  min-width: 56px;
+  font-size: 26px;
   font-weight: 600;
-  letter-spacing: 0.1em;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  transform: translate(-50%, -100%);
+}
+
+.faixa__etiqueta[data-abaixo] {
+  top: calc(var(--tampa-a) + 6px);
+  transform: translate(-50%, 0);
+}
+
+/* De onde o fader saiu: marca tracejada com o numero antigo. */
+.faixa__antes {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--antes) * 100%);
+  height: 0;
+  border-top: 1px dashed var(--tinta-2);
+}
+
+.faixa__antes .n {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 11px;
+  color: var(--tinta-2);
+}
+
+.faixa__pe {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--tinta-3);
+  text-align: center;
+}
+
+.faixa__pe .n {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--tinta-2);
+}
+
+.faixa__mudo {
+  flex: none;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--linha);
+  border-radius: 0 0 var(--raio-p) var(--raio-p);
+  background: var(--chassi-2);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+  color: var(--tinta-3);
   cursor: pointer;
 }
 
-.fader__mudo:active { background: var(--superficie-3); }
+.faixa__mudo:active { background: var(--chassi-3); }
 
-.fader__mudo[aria-pressed="true"] {
-  background: var(--texto);
-  border-color: var(--texto);
-  color: var(--fundo);
+/* Mudo ligado: a tecla acende em ambar; a tampa fica oca e o nivel some. */
+.faixa[data-mudo="1"] .faixa__mudo {
+  background: var(--ambar);
+  border-top-color: var(--ambar);
+  color: var(--ambar-tinta);
 }
 
-.fader__rotulo {
-  text-align: center;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--texto-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.faixa[data-mudo="1"] .faixa__tampa {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--tinta-3);
 }
 
-/* A classe vem do "tipo" do controle (canal, reverb, master), do jeito que o
-   bridge manda no protocolo. */
-.fader--master .fader__rotulo,
-.fader--master .fader__valor { color: var(--texto); }
+.faixa[data-mudo="1"] .faixa__tampa::after { background: var(--tinta-3); }
+.faixa[data-mudo="1"] .faixa__nivel { opacity: 0; }
+.faixa[data-mudo="1"] .faixa__valor { color: var(--tinta-3); }
 
-.fader--master .fader__rotulo {
-  font-size: 9px;
-  letter-spacing: 0.02em;
-}
+/* Canal que a mesa nao confirmou: apagado, sem tampa e sem nivel, valor "?". */
+.faixa--inativo { opacity: 0.38; }
 
-.fader--master .fader__trilho { border-color: var(--linha-forte); }
+.faixa--inativo .faixa__trilho,
+.faixa--inativo .faixa__mudo { cursor: not-allowed; }
 
-.fader--reverb .fader__trilho { border-style: dashed; }
+.faixa--inativo .faixa__tampa,
+.faixa--inativo .faixa__nivel { visibility: hidden; }
 
-/* Canal mudo: o fader continua na posicao, mas fica claro que nao sai som. */
-.fader[data-mudo="1"] .fader__nivel { opacity: 0.3; }
-.fader[data-mudo="1"] .fader__punho { background: var(--texto-3); }
-.fader[data-mudo="1"] .fader__valor { color: var(--texto-3); }
+/* Plano B: controle ainda nao calibrado (mexe so na tela). */
+.faixa--cru .faixa__tampa { background: var(--tinta-3); }
 
-/* Controle ainda nao calibrado: mexe so na tela, nao chega na mesa. */
-.fader--cru .fader__punho { background: var(--texto-2); }
-.fader--cru .fader__rotulo::after {
+.faixa--cru .faixa__nome::after {
   content: " *";
-  color: var(--texto-3);
+  color: var(--tinta-3);
 }
 
-/* --------------------------- tela de aviso ------------------------------- */
+/* Assinatura do toque: as outras faixas recuam enquanto um dedo mexe. */
+body[data-toque] .faixa:not(.faixa--tocando) { opacity: 0.4; }
+body[data-toque] .faixa--inativo:not(.faixa--tocando) { opacity: 0.2; }
 
-.vazio {
+/* Valor vindo de fora (troca de cena, outro celular): a tampa desliza como os
+   faders motorizados da 01V96. Nunca sob o dedo. */
+.faixa--motor .faixa__pista,
+.faixa--motor .faixa__nivel {
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Volume geral: coluna fixa a direita. */
+.faixa--mestre {
+  width: 100%;
+  padding-top: 2px;
+  background: none;
+}
+
+.faixa--mestre .faixa__cabeca { min-height: 30px; padding: 0; }
+.faixa--mestre .faixa__num { display: none; }
+
+.faixa--mestre .faixa__nome {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--tinta-2);
+}
+
+.faixa--mestre .faixa__valor {
+  height: 32px;
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.faixa--mestre .faixa__tampa {
+  width: 56px;
+  margin-left: -28px;
+  background: var(--tinta);
+}
+
+.faixa--mestre .faixa__tampa::after {
+  height: 3px;
+  margin-top: -1.5px;
+}
+
+.faixa--mestre .faixa__fenda {
+  width: 6px;
+  margin-left: -3px;
+}
+
+.faixa--mestre .faixa__nivel { background: var(--tinta-2); }
+
+/* Sem conexao, ou mesa fora do cabo: faders travados e apagados, tampas ocas. */
+body[data-conexao="offline"] .mesa > .canais,
+body[data-conexao="offline"] .mesa > .mestre,
+body[data-mesa="fora"] #fone > .canais,
+body[data-mesa="fora"] #fone > .mestre {
+  opacity: 0.28;
+  pointer-events: none;
+}
+
+body[data-conexao="offline"] .faixa__tampa,
+body[data-mesa="fora"] #fone .faixa__tampa {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--tinta-3);
+}
+
+body[data-conexao="offline"] .faixa__tampa::after,
+body[data-mesa="fora"] #fone .faixa__tampa::after { background: var(--tinta-3); }
+
+/* ---------------------- fone ainda sem canais ---------------------------- */
+
+.espera {
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 28px;
-  text-align: center;
-  background: var(--fundo);
+  padding: 24px var(--margem);
+  background: var(--painel);
+  overflow-y: auto;
+  animation: aparecer 160ms ease-out;
 }
 
-.vazio__arte {
-  width: 62px;
-  height: 62px;
-  margin-bottom: 4px;
-  fill: none;
-  stroke: var(--linha-forte);
-  stroke-width: 1.6;
-  stroke-linecap: round;
+.situacao__casa {
+  width: 100%;
+  max-width: 380px;
+}
+
+.situacao {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.situacao__texto {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.45;
+  color: var(--tinta-2);
+  text-align: center;
+}
+
+.situacao .aviso--alerta { margin-top: 0; }
+
+.situacao__acoes {
+  display: flex;
+  flex-direction: column;
+}
+
+.vazio {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 340px;
+  text-align: center;
 }
 
 .vazio__titulo {
   margin: 0;
-  font-size: 17px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  color: var(--texto);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
 }
 
 .vazio__texto {
   margin: 0;
-  max-width: 32ch;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.5;
-  color: var(--texto-2);
+  color: var(--tinta-2);
 }
-
-.vazio .botao { margin-top: 8px; }
 
 /* ------------------------------ rodape ----------------------------------- */
 
 .rodape {
-  padding: 10px 14px;
-  padding-bottom: calc(10px + env(safe-area-inset-bottom));
-  background: var(--superficie);
+  grid-area: rodape;
+  padding: 9px calc(var(--margem) + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) calc(var(--margem) + env(safe-area-inset-left));
   border-top: 1px solid var(--linha);
-  font-size: 11px;
-  color: var(--texto-3);
+  font-size: 13px;
+  color: var(--tinta-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* Aviso passageiro: enquanto tem texto, toma o lugar do rodape de sempre. */
 .rodape[data-aviso] .rodape__texto { display: none; }
+.rodape__aviso { color: var(--tinta); }
 
-.rodape__aviso { color: var(--texto); }
+/* -------------------------- qual e o seu fone ---------------------------- */
+
+body[data-tela="escolha"] .comando,
+body[data-tela="escolha"] .palco,
+body[data-tela="escolha"] .rodape { display: none; }
+
+.escolha {
+  grid-area: 1 / 1 / -1 / -1;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "titulo" "aviso" "grade" "." "pe";
+  row-gap: 14px;
+  min-height: 0;
+  padding: calc(18px + env(safe-area-inset-top)) calc(var(--margem) + env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) calc(var(--margem) + env(safe-area-inset-left));
+  overflow-x: hidden;
+  overflow-y: auto;
+  animation: aparecer 160ms ease-out;
+}
+
+.escolha__titulo {
+  grid-area: titulo;
+  padding-right: 48px;
+}
+
+.escolha h1 {
+  margin: 6px 0 8px;
+  font-size: 31px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+/* Foco vindo do app (troca de tela), nao do teclado: sem moldura. */
+.escolha h1:focus { outline: none; }
+
+.escolha__titulo p {
+  margin: 0;
+  max-width: 36ch;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--tinta-2);
+}
+
+.escolha__engrenagem {
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top));
+  right: calc(2px + env(safe-area-inset-right));
+}
+
+.escolha__aviso { grid-area: aviso; }
+.escolha__aviso .aviso { margin-top: 0; }
+.escolha__aviso:not(:has(.aviso:not([hidden]))) { display: none; }
+
+.escolha__aviso .aviso--lendo {
+  padding: 2px 0;
+  font-size: 14px;
+}
+
+/* Os 8 Aux: teclas grandes, sem enfeite. */
+.grade-fones {
+  grid-area: grade;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: 100px;
+  gap: 6px;
+  align-content: start;
+}
+
+.aux {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 11px 12px 13px;
+  background: var(--chassi);
+  border: 1px solid var(--linha);
+  border-radius: var(--raio);
+  text-align: left;
+  cursor: pointer;
+}
+
+.aux:active { background: var(--chassi-2); }
+
+.aux__num {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tinta-3);
+}
+
+.aux__num .n {
+  margin-left: 2px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--tinta-2);
+}
+
+/* Ate 2 linhas: na paisagem a tecla e estreita e "Back vocal" nao cabe numa. */
+.aux__nome {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.aux--sem .aux__num {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.aux--sem .aux__nome {
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--tinta-2);
+}
+
+.aux--sem .aux__nome .n { font-size: 20px; }
+
+.aux[aria-current="true"] {
+  background: var(--chassi-2);
+  border-color: var(--tinta-2);
+  box-shadow: inset 0 0 0 1px var(--tinta-2);
+}
+
+.aux__atual {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.escolha__pe {
+  grid-area: pe;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.continuar {
+  min-height: 52px;
+  padding: 8px 12px;
+  border: 1px solid var(--linha-2);
+  border-radius: var(--raio);
+  background: var(--chassi-2);
+  font-size: 17px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.continuar .n { font-size: 16px; font-weight: 600; }
+.continuar__nome { font-weight: 500; color: var(--tinta-2); }
+
+.escolha__ajustes-rotulo { display: none; }
 
 /* ------------------------- folhas (dialogos) ----------------------------- */
 
-/* No celular sobem de baixo, como folha de app. No computador viram cartao. */
+/* No celular sobem de baixo, como folha. Sem blur no fundo: so escurece. */
 .painel {
-  margin: auto auto 0;
   width: 100%;
   max-width: 100%;
+  margin: auto auto 0;
   padding: 0;
-  border: none;
-  border-top: 1px solid var(--linha);
-  border-radius: var(--raio-g) var(--raio-g) 0 0;
-  background: var(--superficie);
-  color: var(--texto);
-  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.7);
+  border: 0;
+  border-top: 1px solid var(--linha-2);
+  border-radius: var(--raio) var(--raio) 0 0;
+  background: var(--chassi);
+  color: var(--tinta);
 }
 
-.painel::backdrop {
-  background: rgba(0, 0, 0, 0.62);
-  -webkit-backdrop-filter: blur(3px);
-  backdrop-filter: blur(3px);
-}
+.painel::backdrop { background: rgba(0, 0, 0, 0.66); }
 
-.painel[open] { animation: subir 0.24s cubic-bezier(0.2, 0.9, 0.3, 1); }
+.painel[open] { animation: subir 200ms ease-out; }
 
 @keyframes subir {
-  from { transform: translateY(24px); opacity: 0; }
+  from { transform: translateY(16px); opacity: 0; }
 }
 
 .painel__conteudo {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 10px 18px 18px;
-  padding-bottom: calc(18px + env(safe-area-inset-bottom));
-  max-height: 86dvh;
+  max-height: 88dvh;
+  padding: 16px calc(var(--margem) + env(safe-area-inset-right)) calc(14px + env(safe-area-inset-bottom)) calc(var(--margem) + env(safe-area-inset-left));
   overflow-y: auto;
 }
 
-/* Folha com lista comprida: so a lista rola, os botoes ficam sempre a mao. */
+/* Folha com lista comprida: so o corpo rola, os botoes ficam a mao. */
 .painel__conteudo--folha {
+  height: 88dvh;
   overflow: hidden;
-  height: 86dvh;
 }
 
 .painel__corpo {
@@ -563,226 +1103,81 @@ body[data-conexao="ligando"] .mestre {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 2px;
   margin: 0 -2px;
+  padding: 2px;
   overflow-y: auto;
   scrollbar-width: thin;
 }
 
-/* A alcinha de cima, que diz "isto sobe e desce". */
-.painel__conteudo::before {
-  content: "";
-  width: 36px;
-  height: 4px;
-  margin: 0 auto 6px;
-  border-radius: 99px;
-  background: var(--linha-forte);
-  flex: none;
-}
-
 .painel__titulo {
   margin: 0;
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
 }
 
 .painel__linha {
   margin: 0;
-  font-size: 13px;
-  color: var(--texto-2);
+  font-size: 14px;
+  color: var(--tinta-2);
   white-space: pre-line;
 }
 
 .painel__rotulo {
   margin: 4px 0 0;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--texto-3);
+  color: var(--tinta-3);
 }
 
 .painel__campo {
   width: 100%;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: var(--raio-p);
-  padding: 13px 13px;
-  color: var(--texto);
-  font-size: 16px; /* 16px evita o zoom automatico do iPhone ao focar */
+  min-height: 44px;
+  padding: 10px 12px;
+  background: var(--painel);
+  border: 1px solid var(--linha-2);
+  border-radius: var(--raio);
+  font-size: 16px; /* 16 px evita o zoom automatico do iPhone ao focar */
+  color: var(--tinta);
   user-select: text;
   -webkit-user-select: text;
 }
 
 .painel__campo:focus {
   outline: none;
-  border-color: var(--linha-forte);
-  background: var(--superficie-3);
+  border-color: var(--tinta-2);
 }
 
 select.painel__campo {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 38px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23adadb8' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23A9AFB3' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
-  background-size: 15px;
+  background-size: 14px;
 }
 
 .painel__ajuda {
   margin: 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--texto-3);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--tinta-3);
 }
 
+/* Erro na folha: o mesmo sinal ambar dos avisos. */
 .painel__erro {
   margin: 0;
-  padding: 11px 13px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha-forte);
-  border-radius: var(--raio-p);
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--texto);
-}
-
-.painel__acoes {
-  display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.painel__acoes .botao { flex: 1; }
-
-/* ------------------------------ botoes ----------------------------------- */
-
-.botao {
-  padding: 13px 18px;
-  border-radius: var(--raio-p);
-  border: 1px solid var(--texto);
-  background: var(--texto);
-  color: var(--fundo);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  cursor: pointer;
-}
-
-.botao:active { opacity: 0.85; }
-
-.botao--fantasma {
-  background: transparent;
-  border-color: var(--linha);
-  color: var(--texto-2);
-  font-weight: 500;
-}
-
-.botao--pequeno {
-  padding: 9px 13px;
-  font-size: 13px;
-}
-
-.botao--largo { width: 100%; }
-
-.botao:disabled { opacity: 0.4; cursor: default; }
-
-/* ------------------------------ bloco da mesa ---------------------------- */
-
-.bloco {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 13px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: var(--raio-m);
-}
-
-.bloco__titulo {
-  margin: 0;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--texto-3);
-}
-
-.bloco__estado {
-  margin: 0;
+  padding: 10px 12px;
+  background: var(--painel);
+  border-left: 3px solid var(--ambar);
   font-size: 14px;
-  font-weight: 500;
-  color: var(--texto);
-}
-
-.bloco__estado--alerta { color: var(--texto-2); }
-
-/* background-color, e nao background: o atalho apagaria a seta do select. */
-.bloco .painel__campo { background-color: var(--superficie); }
-
-.bloco__opcao {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  font-size: 14px;
-  color: var(--texto-2);
-  cursor: pointer;
-}
-
-.bloco__opcao input {
-  width: 20px;
-  height: 20px;
-  margin: 0;
-  flex-shrink: 0;
-  accent-color: var(--texto);
-}
-
-.bloco__texto {
-  margin: 0;
-  font-size: 13px;
   line-height: 1.5;
-  color: var(--texto-2);
+  color: var(--tinta);
 }
 
-/* Dentro do bloco, o que tem fundo proprio desce um tom para nao sumir. */
-.bloco .painel__erro,
-.bloco .medidor { background-color: var(--superficie); }
-
-.bloco__atalhos {
-  display: flex;
-  gap: 6px;
-}
-
-/* Parte do bloco que some junto quando falta o que mostrar. Mesmo ritmo do
-   bloco, para .bloco__retorno continuar acertando o vao. */
-.bloco__grupo {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.bloco__atalhos .botao {
-  flex: 1;
-  min-height: 40px;
-  padding-left: 6px;
-  padding-right: 6px;
-}
-
-/* Resumo e erro da ultima conferencia. Vazio, nao pode deixar um vao a mais
-   no bloco: a margem negativa devolve o gap que o flex do pai poe antes dele. */
-.bloco__retorno {
-  display: flex;
-  flex-direction: column;
-  margin-top: -9px;
-}
-
-.bloco__retorno > * { margin-top: 9px; }
-
-/* Erro com mais de um paragrafo (o teste da mesa que falhou): o ritmo vem do
-   gap, nao da margem de cada um. */
 div.painel__erro {
   display: flex;
   flex-direction: column;
@@ -791,41 +1186,272 @@ div.painel__erro {
 
 div.painel__erro > p { margin: 0; }
 
+.painel__acoes {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.painel__acoes .botao { flex: 1; }
+
+/* ------------------------------ botoes ----------------------------------- */
+
+.botao {
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 1px solid var(--tinta);
+  border-radius: var(--raio);
+  background: var(--tinta);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--painel);
+  cursor: pointer;
+}
+
+.botao:active { background: var(--tampa); }
+
+.botao--fantasma {
+  background: transparent;
+  border-color: var(--linha-2);
+  font-weight: 600;
+  color: var(--tinta);
+}
+
+.botao--fantasma:active { background: var(--chassi-2); }
+
+.botao--pequeno {
+  padding: 8px 12px;
+  font-size: 14px;
+}
+
+.botao--largo { width: 100%; }
+
+.botao:disabled,
+.aviso__acao:disabled { opacity: 0.4; cursor: default; }
+
+/* ------------------------------ blocos ----------------------------------- */
+
+.bloco {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--painel);
+  border: 1px solid var(--linha);
+  border-radius: var(--raio);
+}
+
+.bloco__titulo {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--tinta-3);
+}
+
+.bloco__estado {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--tinta);
+}
+
+.bloco__estado--alerta { color: var(--tinta-2); }
+
+.bloco__texto {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--tinta-2);
+}
+
+.bloco__opcao {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 15px;
+  color: var(--tinta-2);
+  cursor: pointer;
+}
+
+.bloco__opcao input {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--tinta);
+}
+
+/* Resumo e erro da ultima acao. Vazio, nao deixa vao: a margem negativa
+   devolve o gap que o flex do pai poe antes dele. */
+.bloco__retorno {
+  display: flex;
+  flex-direction: column;
+  margin-top: -10px;
+}
+
+.bloco__retorno > * { margin-top: 10px; }
+
+.bloco__grupo {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bloco__atalhos {
+  display: flex;
+  gap: 6px;
+}
+
+.bloco__atalhos .botao {
+  flex: 1;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
 /* O que conferir na mesa. O texto vem pronto do bridge; os nomes dos menus
    ficam em destaque, do jeito que aparecem no visor da mesa. */
-.bloco__passos-titulo { color: var(--texto-2); }
+.bloco__passos-titulo { color: var(--tinta-2); }
 
 .bloco__passos {
   display: flex;
   flex-direction: column;
   gap: 7px;
   margin: 0;
-  padding-left: 20px;
-  color: var(--texto-2);
+  padding-left: 22px;
+  color: var(--tinta-2);
 }
 
 .bloco__passos li { padding-left: 2px; }
 
 .bloco__passos li::marker {
-  color: var(--texto-3);
-  font-variant-numeric: tabular-nums;
+  font-family: var(--numero);
+  color: var(--tinta-3);
 }
 
 .bloco__passos strong {
-  font-weight: 650;
-  color: var(--texto);
-  letter-spacing: 0.01em;
+  font-weight: 700;
+  color: var(--tinta);
 }
 
-/* ---------------------- lista de controles (ajustes) --------------------- */
-
-.lista {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* Medidor sem bolinha: texto, fio de progresso e detalhe. */
+.medidor {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
+  padding: 12px;
+  background: var(--chassi);
+  border: 1px solid var(--linha);
+  border-radius: var(--raio);
+}
+
+.medidor__texto {
+  font-size: 15px;
+  color: var(--tinta-2);
+}
+
+.medidor__texto--ativo {
+  font-weight: 600;
+  color: var(--tinta);
+}
+
+.medidor__texto .n { font-size: 14px; color: var(--tinta); }
+
+.medidor__barra {
+  display: block;
+  height: 2px;
+  background: var(--linha);
+  overflow: hidden;
+}
+
+.medidor__barra > span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--tinta-2);
+  transition: width 200ms ease-out;
+}
+
+.medidor__detalhe {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--tinta-3);
+}
+
+.medidor__hex {
+  font-family: var(--numero);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--tinta-3);
+  word-break: break-all;
+}
+
+/* Avançado (calibracao manual): recolhido, abre num toque. */
+.avancado { display: block; }
+
+.avancado__titulo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  margin: -6px 0;
+  list-style: none;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--tinta-2);
+  cursor: pointer;
+}
+
+.avancado__titulo::-webkit-details-marker { display: none; }
+
+.avancado[open] .avancado__titulo { color: var(--tinta); }
+
+.avancado__seta {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: var(--tinta-2);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 200ms ease-out;
+}
+
+.avancado[open] .avancado__seta { transform: rotate(180deg); }
+
+.avancado__corpo {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* "Criar os outros canais" dentro do Avançado: sem moldura de novo, para a
+   grade de 32 canais nao perder largura em 360 px. Uma linha separa. */
+.avancado__corpo > .bloco {
+  margin-top: 4px;
+  padding: 14px 0 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--linha);
+  border-radius: 0;
+}
+
+/* ---------------------- listas (controles, cenas) ------------------------ */
+
+.lista {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .lista__item {
@@ -833,16 +1459,16 @@ div.painel__erro > p { margin: 0; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 11px 13px;
-  background: var(--superficie-2);
+  padding: 6px 10px;
+  background: var(--chassi);
   border: 1px solid var(--linha);
-  border-radius: var(--raio-m);
+  border-radius: var(--raio);
 }
 
 .lista__info {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -850,24 +1476,16 @@ div.painel__erro > p { margin: 0; }
 .lista__renomear {
   flex: 1 1 auto;
   justify-content: center;
-  min-height: 40px;
+  min-height: 44px;
   margin: 0;
   padding: 0;
   background: none;
   border: 0;
-  border-radius: 6px;
-  color: inherit;
-  font: inherit;
   text-align: left;
   cursor: pointer;
 }
 
-.lista__renomear:active .lista__linha { opacity: 0.6; }
-
-.lista__renomear:focus-visible {
-  outline: 2px solid var(--texto);
-  outline-offset: 4px;
-}
+.lista__renomear:active .lista__linha { color: var(--tinta-2); }
 
 .lista__linha {
   display: flex;
@@ -876,21 +1494,18 @@ div.painel__erro > p { margin: 0; }
   min-width: 0;
 }
 
-/* Alinhado com a primeira linha do nome (15px x 1.3). */
 .lista__lapis {
   width: 14px;
   height: 14px;
-  margin-top: 2.5px;
+  margin-top: 3px;
   flex: none;
   fill: none;
-  stroke: var(--texto-3);
+  stroke: var(--tinta-3);
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-/* Ate duas linhas: com o renomear, "Violao do Pedro" vira nome comum, e em
-   360px uma linha so cortaria quase todos. */
 .lista__nome {
   display: -webkit-box;
   -webkit-box-orient: vertical;
@@ -898,21 +1513,22 @@ div.painel__erro > p { margin: 0; }
   line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
-  font-size: 15px;
-  font-weight: 550;
+  font-size: 16px;
+  font-weight: 600;
   line-height: 1.3;
-  letter-spacing: -0.01em;
 }
+
+.lista__nome--vazio { color: var(--tinta-2); }
 
 .lista__estado {
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--texto-3);
+  color: var(--tinta-3);
 }
 
-.lista__estado--pendente { color: var(--texto-2); }
+.lista__estado--pendente { color: var(--tinta-2); }
 
 .lista__acoes {
   display: flex;
@@ -920,47 +1536,25 @@ div.painel__erro > p { margin: 0; }
   flex: none;
 }
 
-.lista__acoes .botao { min-height: 40px; }
-
-/* Cena sem nome: aparece "Cena 5", um tom abaixo de um nome de verdade. */
-.lista__nome--vazio { color: var(--texto-2); }
-
-/* Dentro de um bloco, o item desce um tom para nao sumir no fundo. */
-.bloco .lista__item { background: var(--superficie); }
-
-/* A cena que esta na mesa agora: borda mais forte e o mesmo ponto aceso da
-   conexao. */
-.lista__item--atual { border-color: var(--linha-forte); }
+/* A cena que esta na mesa agora: borda forte a esquerda e a palavra "agora". */
+.lista__item--atual { border-left: 3px solid var(--tinta); }
 
 .lista__agora {
-  display: flex;
-  align-items: center;
-  gap: 7px;
   flex: none;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--texto);
-}
-
-.lista__agora::before {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--texto);
-  box-shadow: 0 0 0 3px rgba(246, 246, 248, 0.14);
-  flex: none;
+  color: var(--tinta);
 }
 
 .lista__vazio {
   padding: 18px 12px;
-  font-size: 13px;
-  color: var(--texto-3);
+  border: 1px dashed var(--linha-2);
+  border-radius: var(--raio);
+  font-size: 14px;
+  color: var(--tinta-3);
   text-align: center;
-  border: 1px dashed var(--linha);
-  border-radius: var(--raio-m);
 }
 
 /* ------------------------- assistente de calibracao ---------------------- */
@@ -971,64 +1565,55 @@ div.painel__erro > p { margin: 0; }
   gap: 11px;
 }
 
-.etapa__instrucao {
-  margin: 0;
-  font-size: 16px;
-  line-height: 1.5;
-  color: var(--texto);
-}
-
+.etapa__instrucao,
 .etapa__ok {
   margin: 0;
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.5;
-  color: var(--texto);
+  color: var(--tinta);
 }
 
 .etapa__ok::after {
   content: attr(data-detalhe);
   display: block;
   margin-top: 7px;
+  font-family: var(--numero);
   font-size: 11px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  letter-spacing: 0;
-  color: var(--texto-3);
+  color: var(--tinta-3);
 }
 
 /* Escolha de tipo, em segmentos colados. */
 .opcoes {
   display: flex;
-  gap: 3px;
-  padding: 3px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: 11px;
+  gap: 2px;
+  padding: 2px;
+  background: var(--painel);
+  border: 1px solid var(--linha-2);
+  border-radius: var(--raio);
 }
 
 .opcoes__item {
   flex: 1;
-  padding: 9px 4px;
+  min-height: 44px;
+  padding: 8px 4px;
   background: transparent;
-  border: none;
-  border-radius: 8px;
-  color: var(--texto-2);
-  font-size: 13px;
-  font-weight: 500;
+  border: 0;
+  border-radius: var(--raio-p);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--tinta-2);
   cursor: pointer;
 }
 
 .opcoes__item[aria-pressed="true"] {
-  background: var(--texto);
-  color: var(--fundo);
-  font-weight: 600;
+  background: var(--tinta);
+  color: var(--painel);
 }
 
 /* ---------------------- grade de canais da mesa -------------------------- */
 
-/* Vem depois de .opcoes__item de proposito: o botao da grade e um item de
-   opcao (mesmo aria-pressed marcado), so que solto e com borda.
-   8 por linha, como os blocos de faders da mesa. Um respiro a mais entre o 16
-   e o 17 separa as duas camadas (1-16 e 17-32). */
+/* 8 por linha, como os blocos de faders da mesa. Um respiro a mais entre o 16
+   e o 17 separa as duas camadas. */
 .grade {
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
@@ -1036,48 +1621,41 @@ div.painel__erro > p { margin: 0; }
 }
 
 .grade__canal {
-  position: relative;
   min-height: 44px;
   padding: 0;
-  background: var(--superficie);
+  background: var(--chassi);
   border: 1px solid var(--linha);
-  color: var(--texto-2);
-  font-size: 14px;
+  border-radius: var(--raio-p);
+  font-family: var(--numero);
   font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  color: var(--tinta-2);
+  cursor: pointer;
 }
 
 .grade__canal:nth-child(n+17):nth-child(-n+24) { margin-top: 6px; }
 
-.grade__canal[aria-pressed="true"] { border-color: var(--texto); }
-
-.grade__canal:focus-visible {
-  outline: 2px solid var(--texto);
-  outline-offset: 1px;
+/* Celular em pe: 8 por linha nao chega a 44 px de largura. Vira 4 por linha,
+   dois blocos de 4 x 4 (1-16 e 17-32), com o mesmo respiro no meio. */
+@media (max-width: 459px) {
+  .grade { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grade__canal:nth-child(n+17):nth-child(-n+24) { margin-top: 0; }
+  .grade__canal:nth-child(n+17):nth-child(-n+20) { margin-top: 6px; }
 }
 
-/* Canal que ja tem controle: fica visivel, com o ponto de "ja tenho", mas nao
-   da para marcar de novo. */
+.grade__canal[aria-pressed="true"] {
+  border-color: var(--tinta);
+  box-shadow: inset 0 0 0 1px var(--tinta);
+  color: var(--tinta);
+}
+
+/* Canal que ja tem controle: um traco embaixo, e nao da para marcar de novo. */
 .grade__canal--existe {
-  background: var(--superficie-3);
+  background: var(--chassi-2);
   border-color: transparent;
-  color: var(--texto-3);
+  box-shadow: inset 0 -2px 0 var(--tinta-3);
+  color: var(--tinta-3);
   cursor: default;
-}
-
-.grade__canal--existe::after,
-.grade__existe::before {
-  content: "";
-  flex: none;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--texto-2);
-}
-
-.grade__canal--existe::after {
-  position: absolute;
-  top: 5px;
-  right: 5px;
 }
 
 .grade[data-travada="1"] .grade__canal { opacity: 0.5; cursor: default; }
@@ -1088,8 +1666,8 @@ div.painel__erro > p { margin: 0; }
   align-items: center;
   gap: 10px;
   margin: 0;
-  font-size: 12px;
-  color: var(--texto-3);
+  font-size: 13px;
+  color: var(--tinta-3);
 }
 
 .grade__existe {
@@ -1098,125 +1676,230 @@ div.painel__erro > p { margin: 0; }
   gap: 6px;
 }
 
-#gerarContagem {
-  color: var(--texto-2);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Medidor ao vivo: mostra que a mesa esta mesmo mandando mensagem. */
-.medidor {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding: 13px;
-  background: var(--superficie-2);
-  border: 1px solid var(--linha);
-  border-radius: var(--raio-m);
-  min-height: 66px;
-}
-
-.medidor__texto {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13.5px;
-  color: var(--texto-3);
-}
-
-.medidor__texto::before {
+.grade__existe::before {
   content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--linha-forte);
+  width: 14px;
+  height: 2px;
   flex: none;
+  background: var(--tinta-3);
 }
 
-.medidor__texto--ativo {
-  color: var(--texto);
-  font-weight: 500;
-}
+#gerarContagem { color: var(--tinta-2); }
 
-.medidor__texto--ativo::before {
-  background: var(--texto);
-  animation: bater 0.7s ease-in-out infinite;
-}
+/* ================ paisagem de celular (altura baixa) ===================== */
 
-@keyframes bater {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.5); opacity: 0.45; }
-}
+@media (orientation: landscape) and (max-height: 540px) {
+  :root { --trilho-min: 128px; }
 
-.medidor__barra {
-  display: block;
-  height: 4px;
-  border-radius: 99px;
-  background: var(--linha);
-  overflow: hidden;
-}
-
-.medidor__barra > span {
-  display: block;
-  width: 0;
-  height: 100%;
-  border-radius: inherit;
-  background: var(--texto);
-  transition: width 0.2s ease;
-}
-
-.medidor__detalhe {
-  font-size: 12.5px;
-  color: var(--texto-3);
-}
-
-.medidor__hex {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 10px;
-  line-height: 1.6;
-  letter-spacing: 0;
-  color: var(--texto-3);
-  word-break: break-all;
-}
-
-/* ---------------------------- tela grande -------------------------------- */
-
-@media (min-width: 760px) {
-  :root {
-    --largura-fader: 88px;
-    --largura-mestre: 108px;
-    --punho: 36px;
-    --vao: 10px;
+  body {
+    grid-template-columns: 148px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "comando palco";
   }
 
-  .canais { padding: 22px 18px; }
-  .mestre { padding: 22px 18px; }
-  .fader__valor { font-size: 19px; }
-  .fader__rotulo { font-size: 11px; }
-  .fader--master .fader__rotulo { font-size: 10px; }
+  .rodape { display: none; }
+
+  /* O comando vira trilho: mesma ordem, outro eixo. */
+  .comando {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "fone" "cena" "passageiro" "lendo" "aviso" "abas" "." "ajustes";
+    min-height: 0;
+    padding: calc(10px + env(safe-area-inset-top)) 10px calc(8px + env(safe-area-inset-bottom)) calc(var(--margem) + env(safe-area-inset-left));
+    background: var(--chassi);
+    border-right: 1px solid var(--linha-2);
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .fone__nome { font-size: 24px; }
+
+  /* Trilho estreito: o nome do fone quebra em ate 2 linhas em vez de cortar. */
+  .fone__nome > span {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+  }
+
+  .cena { white-space: normal; }
+  .cena__rotulo { white-space: normal; }
+  .passageiro:not([hidden]) { display: block; }
+
+  .aviso--lendo {
+    align-self: start;
+    margin-top: 10px;
+    white-space: normal;
+  }
+
+  .aviso--alerta {
+    padding: 8px 9px;
+    font-size: 14px;
+  }
+
+  .aviso--alerta .aviso__longo { display: none; }
+  .aviso--alerta .aviso__curto { display: block; }
+  .aviso__acao { margin-top: 6px; font-size: 14px; }
+
+  .abas {
+    flex-direction: column;
+    gap: 0;
+    margin-top: 12px;
+  }
+
+  .abas button {
+    margin-left: -10px;
+    padding-left: 10px;
+    text-align: left;
+    box-shadow: inset 2px 0 0 transparent;
+  }
+
+  .abas button[aria-pressed="true"] { box-shadow: inset 2px 0 0 var(--tinta); }
+
+  .comando__voltar { margin: 12px 0 0; width: 100%; }
+
+  .comando > .ajustes {
+    justify-self: stretch;
+    justify-content: flex-start;
+    width: auto;
+    margin: 0 0 0 -2px;
+  }
+
+  .ajustes span {
+    display: inline;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--tinta-2);
+  }
+
+  .palco { border-top: 0; }
+  .canais { padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 10px; }
+  .mestre { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+
+  /* Escolha deitada: texto a esquerda, as oito teclas a direita. */
+  .escolha {
+    grid-template-columns: 272px minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas: "titulo grade" "aviso grade" ". grade" "pe grade";
+    column-gap: 20px;
+    row-gap: 12px;
+    padding: calc(14px + env(safe-area-inset-top)) calc(var(--margem) + env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) calc(var(--margem) + env(safe-area-inset-left));
+  }
+
+  .escolha__titulo { padding-right: 0; }
+  .escolha h1 { margin-top: 2px; font-size: 28px; }
+  .escolha__engrenagem { display: none; }
+
+  .escolha__aviso .aviso--alerta .aviso__longo { display: none; }
+  .escolha__aviso .aviso--alerta .aviso__curto { display: block; }
+
+  /* Com aviso na tela, a explicacao sai: o aviso e o que importa agora. */
+  .escolha:has(.escolha__aviso .aviso--alerta:not([hidden])) .escolha__titulo p { display: none; }
+
+  .grade-fones {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: minmax(88px, 1fr);
+    align-content: stretch;
+  }
+
+  .escolha__ajustes-rotulo {
+    display: flex;
+    justify-content: flex-start;
+    width: auto;
+    margin-left: -2px;
+  }
+
+  .escolha__ajustes-rotulo span {
+    display: inline;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--tinta-2);
+  }
+
+  .painel { width: min(600px, 100vw - 24px); }
+}
+
+/* Paisagem baixa (ate 420 px): o trilho lateral aperta o ritmo para o aviso
+   de falha caber junto com as abas e o Ajustes, sem rolar. */
+@media (orientation: landscape) and (max-height: 420px) {
+  .comando { padding-top: calc(8px + env(safe-area-inset-top)); }
+  .fone__nome { font-size: 22px; }
+  .cena { margin-top: 0; font-size: 14px; }
+  .aviso--alerta { margin-top: 6px; padding: 6px 8px; font-size: 13px; line-height: 1.3; }
+  .aviso__acao { margin-top: 4px; padding: 6px 4px; font-size: 13px; }
+  .aviso--lendo { margin-top: 6px; }
+  .abas { margin-top: 4px; }
+  .continuar { min-height: 44px; }
+
+  .escolha {
+    row-gap: 8px;
+    padding-top: calc(10px + env(safe-area-inset-top));
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .escolha h1 { margin-bottom: 4px; }
+}
+
+/* Muito baixo (celular deitado com a barra do navegador): nome em 1 linha,
+   sem numero do canal e janela do valor menor. */
+@media (max-height: 340px) {
+  .faixa__num { display: none; }
+  .faixa__cabeca { min-height: 18px; }
+  .faixa__nome { -webkit-line-clamp: 1; line-clamp: 1; }
+  .faixa__valor { height: 22px; font-size: 15px; }
+  .faixa--mestre .faixa__cabeca { min-height: 18px; }
+  .faixa--mestre .faixa__nome { -webkit-line-clamp: 1; line-clamp: 1; }
+}
+
+/* Retrato baixo (iPhone SE com a barra do navegador). */
+@media (orientation: portrait) and (max-height: 640px) {
+  .fone__nome { font-size: 25px; }
+  .rodape { display: none; }
+  .passageiro:not([hidden]) { display: block; }
+}
+
+/* Tablet. */
+@media (min-width: 760px) and (min-height: 541px) {
+  :root {
+    --faixa: 64px;
+    --mestre: 96px;
+    --margem: 18px;
+  }
+
+  .faixa__tampa { width: 46px; margin-left: -23px; }
+  .faixa__nome { font-size: 15px; }
+  .faixa__valor { font-size: 19px; }
+  .faixa--mestre .faixa__nome { font-size: 11px; }
+  .faixa--mestre .faixa__valor { font-size: 22px; }
+  .faixa--mestre .faixa__tampa { width: 64px; margin-left: -32px; }
+
+  .grade-fones { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 120px; }
 
   .painel {
+    width: min(480px, calc(100vw - 40px));
     margin: auto;
-    width: min(440px, calc(100vw - 40px));
-    border: 1px solid var(--linha);
-    border-radius: var(--raio-g);
+    border: 1px solid var(--linha-2);
+    border-radius: var(--raio);
   }
 
   .painel__conteudo { padding: 20px; }
-  .painel__conteudo--folha { height: auto; max-height: 82dvh; }
-  .painel__conteudo::before { display: none; }
+  .painel__conteudo--folha { height: auto; max-height: 84dvh; }
   .painel__acoes { justify-content: flex-end; }
   .painel__acoes .botao { flex: 0 0 auto; }
 }
 
-@media (max-height: 620px) {
-  .fader__trilho { min-height: 100px; }
-  .fader__mudo { height: 26px; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .conexao__ponto,
-  .cena--trocou,
-  .medidor__texto--ativo::before,
-  .painel[open] { animation: none; }
-  .medidor__barra > span { transition: none; }
+  .painel[open],
+  .aviso--alerta,
+  .espera,
+  .escolha { animation: none; }
+
+  .faixa,
+  .faixa--motor .faixa__pista,
+  .faixa--motor .faixa__nivel,
+  .cena__rotulo,
+  .aviso__fio i,
+  .medidor__barra > span,
+  .avancado__seta { transition: none; }
 }

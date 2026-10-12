@@ -2,12 +2,15 @@
 /* ---------------------------------------------------------------------------
    Monitor 01V96 - app do celular
 
-   Desenha os faders a partir da lista que o bridge manda, fala WebSocket,
-   reconecta sozinho quando o Wi-Fi oscila, e conduz a calibracao de cada
-   controle sem precisar de terminal na maquina da mesa.
+   O bridge le a mesa inteira sozinho. A pessoa escolhe qual e o fone dela
+   (Aux 1 a 8) e recebe os canais com os nomes que estao na mesa. Fala
+   WebSocket, reconecta sozinho quando o Wi-Fi oscila e, como plano B, ainda
+   conduz a calibracao de cada controle sem terminal na maquina da mesa.
    --------------------------------------------------------------------------- */
 
 const CHAVE_BRIDGE = 'monitor01v96.bridge';
+const CHAVE_FONE = 'monitor01v96.fone';
+const CHAVE_PLANO_B = 'monitor01v96.planoB';
 const PASSO_TECLADO = 0.02;
 const PASSO_TECLADO_GRANDE = 0.1;
 const INTERVALO_ENVIO = 40;   // ms entre lotes de mensagens para o bridge
@@ -15,14 +18,15 @@ const BACKOFF_MAX = 5000;     // teto do tempo de espera entre reconexoes
 
 const elCanais = document.getElementById('canais');
 const elMestre = document.getElementById('mestre');
-const elConexao = document.getElementById('conexao');
-const elConexaoTexto = document.getElementById('conexaoTexto');
 const elRodape = document.getElementById('rodape');
 const elVazio = document.getElementById('vazio');
 const elVazioTitulo = document.getElementById('vazioTitulo');
 const elVazioTexto = document.getElementById('vazioTexto');
 const elVazioAcao = document.getElementById('vazioAcao');
 const molde = document.getElementById('moldeFader');
+const elLegado = document.getElementById('legado');
+const elComandoPlano = document.getElementById('comandoPlano');
+const elPlanoLegenda = document.getElementById('planoLegenda');
 
 const elAjustes = document.getElementById('ajustes');
 const elListaControles = document.getElementById('listaControles');
@@ -45,13 +49,76 @@ function limitar01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
-function definirConexao(estado, texto) {
+/** Valor 0..1 vindo do bridge; o que nao for numero vira 0. */
+function valor01(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? limitar01(n) : 0;
+}
+
+/** 0..1 com 4 casas: sobra precisao para a mesa e a mensagem fica curta. */
+function arredondar01(v) {
+  return Math.round(limitar01(v) * 10000) / 10000;
+}
+
+function textoLimpo(v) {
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function inteiroOuZero(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/* O celular pode negar o armazenamento (aba anonima, dados bloqueados). Sem
+   ele o app funciona igual; so esquece a escolha ao fechar. */
+function lerSalvo(chave) {
+  try {
+    return localStorage.getItem(chave) || '';
+  } catch {
+    return '';
+  }
+}
+
+function salvar(chave, valor) {
+  try {
+    if (valor === '' || valor === null || valor === undefined) localStorage.removeItem(chave);
+    else localStorage.setItem(chave, String(valor));
+  } catch { /* sem armazenamento: vale so enquanto o app estiver aberto */ }
+}
+
+/** 'ligando' (abrindo o app), 'online' ou 'offline' (caiu e tenta de novo). */
+function definirConexao(estado) {
+  if (document.body.dataset.conexao === estado) return;
   document.body.dataset.conexao = estado;
-  elConexaoTexto.textContent = texto;
+  desenharAvisos();
+}
+
+/**
+ * Escreve um texto com os numeros dados (contagens, progresso) na fonte de
+ * mostrador. Monta os nos na mao: o texto pode vir do bridge, nada de HTML.
+ */
+function escreverComNumeros(el, texto) {
+  el.textContent = '';
+  for (const pedaco of String(texto).split(/(\d+)/)) {
+    if (!pedaco) continue;
+    if (/^\d+$/.test(pedaco)) {
+      const n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = pedaco;
+      el.appendChild(n);
+    } else {
+      el.appendChild(document.createTextNode(pedaco));
+    }
+  }
+}
+
+/** "03": numero de canal e de cena com dois digitos, como no visor. */
+function doisDigitos(n) {
+  return String(n).padStart(2, '0');
 }
 
 function urlDoBridge() {
-  const salvo = (localStorage.getItem(CHAVE_BRIDGE) || '').trim();
+  const salvo = lerSalvo(CHAVE_BRIDGE).trim();
   if (salvo) return salvo;
   const protocolo = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return protocolo + '//' + location.host;
@@ -62,133 +129,354 @@ function urlHttpDoBridge() {
   return urlDoBridge().replace(/^ws/, 'http').replace(/\/+$/, '');
 }
 
+/**
+ * Rodape de uma linha, em tom baixo. Com a mesa pronta:
+ * "Mesa lida às 19:42 · 11 canais com som no seu fone".
+ */
 function atualizarRodape() {
   if (!conectado) {
-    elRodape.textContent = 'sem conexão com o bridge: ' + urlDoBridge();
+    // O aviso "Sem conexão" ja diz o que houve; aqui fica o endereco tentado.
+    elRodape.textContent = 'procurando o programa em ' + urlDoBridge();
     return;
   }
 
   const partes = [];
-  if (statusMidi) {
-    partes.push(statusMidi.simulado
-      ? 'sem mesa conectada (nada sai daqui)'
-      : 'mesa: ' + statusMidi.saida + (mesa.rota ? ', canal MIDI ' + mesa.rota.canalMidi : ''));
+  const situacao = usandoMapa() ? estadoDaMesa() : null;
+  if (situacao === 'sem-rota' || situacao === 'testando' || situacao === 'desligada' || situacao === 'esperando') {
+    // Sem caminho ate a mesa, contagem de canais nao diz nada: o rodape diz onde.
+    partes.push(situacao === 'testando' ? 'testando o caminho até a mesa'
+      : situacao === 'desligada' ? 'sem mesa no cabo USB'
+        : situacao === 'esperando' ? 'esperando a mesa'
+          : 'mesa sem resposta' + (statusMidi && statusMidi.saida ? ' em ' + statusMidi.saida : ''));
+  } else if (usandoMapa()) {
+    if (prontaParaUsar()) {
+      const quando = quandoNoDiagnostico(mapa.sincronizadaEm);
+      partes.push(quando ? 'Mesa lida ' + quando : 'Mesa lida');
+    }
+    if (fone.estado) {
+      let comSom = 0;
+      for (const c of fone.estado.canais.values()) if (temSom(c)) comSom++;
+      partes.push(comSom === 1 ? '1 canal com som no seu fone' : comSom + ' canais com som no seu fone');
+    }
+    const semResposta = canaisSemResposta();
+    if (semResposta) {
+      partes.push(semResposta === 1 ? '1 sem resposta da mesa' : semResposta + ' sem resposta da mesa');
+    }
+  } else {
+    if (statusMidi) {
+      partes.push(statusMidi.simulado
+        ? 'sem mesa no cabo USB: nada sai daqui'
+        : 'mesa: ' + statusMidi.saida + (mesa.rota ? ', canal MIDI ' + mesa.rota.canalMidi : ''));
+    }
+    const semCalibrar = listaControles.filter((c) => !c.calibrated).length;
+    if (semCalibrar) partes.push(semCalibrar + ' sem calibrar (*)');
   }
-  const semCalibrar = listaControles.filter((c) => !c.calibrated).length;
-  if (semCalibrar) partes.push(semCalibrar + ' sem calibrar (*)');
-  elRodape.textContent = partes.join('   |   ') || 'conectado';
+  elRodape.textContent = partes.join(' · ');
 }
 
-/** Mostra a tela de aviso no lugar dos faders, quando faz sentido. */
-function atualizarVazio() {
-  if (!conectado) {
-    elVazio.hidden = false;
-    elVazioTitulo.textContent = 'Sem conexão com o bridge';
-    elVazioTexto.textContent =
-      'Confira se o programa está rodando na máquina ligada na mesa e se o ' +
-      'celular está na mesma rede Wi-Fi.';
-    elVazioAcao.hidden = true;
-    return;
-  }
+/**
+ * Qual tela aparece. A conexao nao troca a tela: sem ela, a tela de sempre
+ * fica, apagada, com o aviso "Sem conexão" no topo.
+ *  - bridge que nao le a mesa (versao antiga) ou plano B: os controles calibrados;
+ *  - sem fone escolhido (ou trocando): "Qual é o seu fone?";
+ *  - com fone: os canais dele.
+ */
+function desenharPalco() {
+  const usarLegado = modo === 'legado' || (modo === 'mapa' && planoB && listaControles.length > 0);
+  let tela;
+  if (usarLegado) tela = listaControles.length ? 'legado' : 'sem-controles';
+  else if (!fone.aux || fone.escolhendo) tela = 'escolha';
+  else tela = 'fone';
 
-  if (!listaControles.length) {
-    elVazio.hidden = false;
+  const antes = document.body.dataset.tela;
+  document.body.dataset.tela = tela;
+
+  elFone.hidden = tela !== 'fone';
+  elEscolha.hidden = tela !== 'escolha';
+  elLegado.hidden = tela !== 'legado';
+  elVazio.hidden = tela !== 'sem-controles';
+  elVazioAcao.hidden = tela !== 'sem-controles';
+  if (tela === 'sem-controles') {
     elVazioTitulo.textContent = 'Nenhum controle ainda';
     elVazioTexto.textContent =
       'Cada controle é o send de um canal da mesa para o Aux do seu fone. ' +
       'Calibre o primeiro para começar.';
-    elVazioAcao.hidden = false;
-    return;
   }
 
-  elVazio.hidden = true;
+  // O comando e o mesmo: no plano B, o titulo diz isso e da o caminho de volta.
+  const plano = tela === 'legado' || tela === 'sem-controles';
+  elFoneTrocar.hidden = plano;
+  elComandoPlano.hidden = !plano;
+  elPlanoLegenda.textContent = modo === 'legado' ? 'Monitor 01V96' : 'Plano B';
+  // Sem nenhum canal confirmado pela mesa, filtrar "com som" nao faz sentido.
+  elFoneFiltro.hidden = plano || !foneComCanais();
+  elLegadoVoltar.hidden = !plano || modo === 'legado';
+
+  if (tela === 'escolha') desenharEscolha();
+  if (tela === 'fone') desenharTelaDoFone();
+  // O nome so pode ser medido com a faixa na tela.
+  if (tela === 'legado') for (const comp of faders.values()) comp.encaixar();
+  desenharAvisos();
+  atualizarRodape();
+
+  // Trocou de tela pelo toque da pessoa: o foco vai junto, para o leitor de
+  // tela e o teclado nao ficarem num botao que sumiu.
+  if (antes !== tela && document.activeElement && document.activeElement !== document.body &&
+      !document.activeElement.offsetParent && !elAjustes.open) {
+    if (tela === 'fone') elFoneTrocar.focus();
+    else if (tela === 'escolha') elEscolhaTitulo.focus();
+  }
 }
 
 /* ------------------------------ componente ------------------------------- */
 
-function criarFader(controle) {
+const DESLIZE_QUE_VIRA_ROLAGEM = 12; // px: ate aqui, gesto cancelado era rolar as faixas
+const ECO_MS = 600;       // eco do proprio movimento que volta do bridge: ignora por este tempo
+const MOTOR_MS = 260;     // deslize da tampa com valor vindo de fora (240 ms + folga)
+const NOME_MAIOR = 14;    // px: nome do canal em ate 2 linhas
+const NOME_MENOR = 12;    // px: se uma palavra nao couber, desce ate aqui antes de quebrar
+
+/* Dedos em cima de algum fader agora. O aviso que mexe no layout espera
+   todos soltarem: nada pode andar debaixo do dedo. */
+let dedosNoFader = 0;
+const aoSoltarTodos = [];
+
+/**
+ * Encaixe do nome: ate 2 linhas a 14 px. Se uma palavra nao cabe na largura,
+ * desce 0,5 px por vez ate 12 e so depois quebra a palavra. Roda ao desenhar
+ * e ao renomear, nunca a cada quadro. Escondido (sem largura) fica para depois.
+ */
+function encaixarNome(el, menor = NOME_MENOR) {
+  if (!el.clientWidth) return false;
+  el.style.fontSize = '';
+  el.style.overflowWrap = '';
+  let tamanho = parseFloat(getComputedStyle(el).fontSize) || NOME_MAIOR;
+  while (el.scrollWidth > el.clientWidth + 0.5 && tamanho > menor) {
+    tamanho -= 0.5;
+    el.style.fontSize = tamanho + 'px';
+  }
+  if (el.scrollWidth > el.clientWidth + 0.5) el.style.overflowWrap = 'anywhere';
+  return true;
+}
+
+/**
+ * Uma faixa de fader com valor, trilho, mudo e nome. Nao sabe para onde
+ * manda: quem cria passa aoMudarValor e aoMudarMudo (send do fone, ou
+ * controle calibrado).
+ *
+ * opcoes: { tipo, rotulo, rotuloAcessivel, numero, aoMudarValor(v),
+ *           aoMudarMudo(mudo), aoTocarInativo() }
+ */
+function criarFader(opcoes) {
   const no = molde.content.firstElementChild.cloneNode(true);
-  no.classList.add('fader--' + (controle.type || 'canal'));
-  if (!controle.calibrated) no.classList.add('fader--cru');
+  const tipo = opcoes.tipo || 'canal';
+  no.classList.add(tipo === 'master' ? 'faixa--mestre' : 'faixa--' + tipo);
 
   const trilho = no.querySelector('[data-trilho]');
   const saidaValor = no.querySelector('[data-valor]');
-  const botaoMudo = no.querySelector('[data-mudo]');
+  const botaoMudo = no.querySelector('button[data-mudo]');
   const rotulo = no.querySelector('[data-rotulo]');
+  const numero = no.querySelector('[data-num]');
+  const etiqueta = no.querySelector('[data-etiqueta]');
+  const antes = no.querySelector('[data-antes]');
+  const antesValor = no.querySelector('[data-antes-valor]');
+  const pe = no.querySelector('[data-pe]');
 
-  rotulo.textContent = controle.label;
-  trilho.setAttribute('aria-label', controle.label);
+  let timerMotor = null;
 
   const comp = {
-    controle,
     no,
     valor: 0,
     mudo: false,
+    ativo: true,
+    arrastando: false,
+    tocando: false,   // o dedo ja mudou o valor: a assinatura do toque esta na tela
+    encaixado: false, // nome ja medido na largura atual
+    mexidoEm: 0,      // ultima vez que a pessoa mexeu aqui (para ignorar o eco)
 
-    /** Atualiza a tela. Se avisar = true, manda o novo valor para o bridge. */
-    aplicar(valor, avisar) {
-      comp.valor = limitar01(valor);
+    /**
+     * Atualiza a tela. avisar = true manda o valor novo para o bridge.
+     * deslizar = true (valor vindo de fora) faz a tampa andar como um fader
+     * motorizado; nunca debaixo do dedo.
+     */
+    aplicar(valor, avisar, deslizar) {
+      const novo = limitar01(valor);
+      if (deslizar && !comp.arrastando && Math.abs(novo - comp.valor) > 0.004) {
+        no.classList.add('faixa--motor');
+        clearTimeout(timerMotor);
+        timerMotor = setTimeout(() => no.classList.remove('faixa--motor'), MOTOR_MS);
+      }
+      comp.valor = novo;
       const porcento = Math.round(comp.valor * 100);
       no.style.setProperty('--v', String(comp.valor));
-      saidaValor.textContent = porcento;
+      saidaValor.textContent = comp.ativo ? porcento : '?';
       trilho.setAttribute('aria-valuenow', String(porcento));
-      trilho.setAttribute('aria-valuetext', porcento + ' por cento');
-      if (avisar) enviarValor(controle.id, comp.valor);
+      trilho.setAttribute('aria-valuetext', comp.ativo ? porcento + ' de 100' : 'a mesa não confirmou');
+      if (comp.tocando) {
+        etiqueta.textContent = porcento;
+        etiqueta.toggleAttribute('data-abaixo', comp.valor > 0.8);
+      }
+      if (avisar) {
+        comp.mexidoEm = Date.now();
+        opcoes.aoMudarValor(comp.valor);
+      }
     },
 
     definirMudo(mudo, avisar) {
       comp.mudo = !!mudo;
       botaoMudo.setAttribute('aria-pressed', comp.mudo ? 'true' : 'false');
       no.dataset.mudo = comp.mudo ? '1' : '0';
-      if (avisar) enviar({ type: 'mute', control: controle.id, muted: comp.mudo });
+      if (avisar) opcoes.aoMudarMudo(comp.mudo);
+    },
+
+    /**
+     * Nome na tela e o que o leitor de tela fala (pode ser mais completo).
+     * Canal sem nome na mesa: "CH" + numero, num tom abaixo.
+     */
+    renomear(texto, acessivel, extra) {
+      const semNome = !!(extra && extra.semNome);
+      rotulo.classList.toggle('faixa__nome--sem', semNome);
+      if (semNome && extra.numero) {
+        rotulo.textContent = 'CH ';
+        const n = document.createElement('span');
+        n.className = 'n';
+        n.textContent = doisDigitos(extra.numero);
+        rotulo.appendChild(n);
+      } else {
+        rotulo.textContent = texto;
+      }
+      const falado = acessivel || texto;
+      trilho.setAttribute('aria-label', falado);
+      botaoMudo.setAttribute('aria-label', 'Mudo: ' + falado);
+      comp.encaixado = encaixarNome(rotulo);
+    },
+
+    /** Mede o nome de novo (faixa que acabou de aparecer, tela girou). */
+    encaixar() {
+      if (!comp.encaixado) comp.encaixado = encaixarNome(rotulo);
+    },
+
+    /** Numero do canal em cima do nome ("05"). */
+    numerar(n) {
+      numero.textContent = n ? doisDigitos(n) : '';
+      numero.hidden = !n;
+    },
+
+    /** Texto do pe (o volume geral mostra o Aux: "AUX 3"). */
+    definirPe(rotuloPe, n) {
+      pe.textContent = rotuloPe ? rotuloPe + ' ' : '';
+      if (n) {
+        const num = document.createElement('span');
+        num.className = 'n';
+        num.textContent = String(n);
+        pe.appendChild(num);
+      }
+      pe.hidden = !rotuloPe;
+    },
+
+    /** Inativo: aparece apagado, nao mexe e conta por que ao ser tocado. */
+    definirAtivo(ativo, dica) {
+      comp.ativo = !!ativo;
+      no.classList.toggle('faixa--inativo', !comp.ativo);
+      trilho.setAttribute('aria-disabled', comp.ativo ? 'false' : 'true');
+      botaoMudo.setAttribute('aria-disabled', comp.ativo ? 'false' : 'true');
+      if (comp.ativo) no.removeAttribute('title');
+      else if (dica) no.title = dica;
+      comp.aplicar(comp.valor, false);
     }
   };
+
+  /* ---- assinatura do toque ---------------------------------------------
+     Liga no primeiro movimento vertical que muda o valor (nao no toque: a
+     rolagem lateral nao pisca nada). As outras faixas recuam, uma etiqueta
+     com o numero segue o dedo e uma marca tracejada guarda onde o fader
+     estava, para voltar ao ponto exato. Ao soltar, some na hora.          */
+
+  function iniciarToque(valorDeAntes) {
+    comp.tocando = true;
+    no.classList.add('faixa--tocando');
+    document.body.dataset.toque = '1';
+    no.style.setProperty('--antes', String(valorDeAntes));
+    antesValor.textContent = Math.round(valorDeAntes * 100);
+    antes.hidden = false;
+    etiqueta.hidden = false;
+  }
+
+  function terminarToque() {
+    if (!comp.tocando) return;
+    comp.tocando = false;
+    no.classList.remove('faixa--tocando');
+    etiqueta.hidden = true;
+    antes.hidden = true;
+    if (!document.querySelector('.faixa--tocando')) delete document.body.dataset.toque;
+  }
 
   /* ---- arraste com dedo ou mouse ---------------------------------------
      O movimento e relativo: o fader anda o quanto o dedo andou, e nao pula
      para onde voce encostou. No escuro, encostar sem querer nao estoura o
-     volume no ouvido.                                                      */
+     volume no ouvido.
+     O trilho deixa o navegador rolar as faixas para o lado (touch-action:
+     pan-x). Quando ele assume o gesto, chega pointercancel: se o dedo mal
+     andou na vertical, era rolagem, e o fader volta para onde estava.     */
 
-  let arrastando = false;
   let yInicial = 0;
   let valorInicial = 0;
   let cursoUtil = 1;
 
-  function alturaPunho() {
-    const bruto = getComputedStyle(no).getPropertyValue('--punho');
-    const n = parseFloat(bruto);
-    return Number.isFinite(n) ? n : 30;
+  function alturaTampa() {
+    const n = parseFloat(getComputedStyle(no).getPropertyValue('--tampa-a'));
+    return Number.isFinite(n) ? n : 24;
   }
 
   trilho.addEventListener('pointerdown', (ev) => {
-    arrastando = true;
+    if (!comp.ativo) {
+      if (opcoes.aoTocarInativo) opcoes.aoTocarInativo();
+      return;
+    }
+    if (comp.arrastando) return;
+    comp.arrastando = true;
+    dedosNoFader++;
     yInicial = ev.clientY;
     valorInicial = comp.valor;
-    cursoUtil = Math.max(1, trilho.clientHeight - alturaPunho());
+    cursoUtil = Math.max(1, trilho.clientHeight - alturaTampa());
     no.dataset.arrastando = '1';
+    no.classList.remove('faixa--motor');
     try { trilho.setPointerCapture(ev.pointerId); } catch { /* ignora */ }
     ev.preventDefault();
   });
 
   trilho.addEventListener('pointermove', (ev) => {
-    if (!arrastando) return;
+    if (!comp.arrastando) return;
     const delta = (yInicial - ev.clientY) / cursoUtil; // para cima aumenta
-    comp.aplicar(valorInicial + delta, true);
+    const novo = limitar01(valorInicial + delta);
+    if (!comp.tocando && Math.round(novo * 100) !== Math.round(valorInicial * 100)) {
+      iniciarToque(valorInicial);
+    }
+    comp.aplicar(novo, true);
     ev.preventDefault();
   });
 
-  function soltar(ev) {
-    if (!arrastando) return;
-    arrastando = false;
+  function soltar(ev, cancelado) {
+    if (!comp.arrastando) return;
+    comp.arrastando = false;
     delete no.dataset.arrastando;
     try { trilho.releasePointerCapture(ev.pointerId); } catch { /* ignora */ }
+    if (cancelado && Math.abs(ev.clientY - yInicial) < DESLIZE_QUE_VIRA_ROLAGEM && comp.valor !== valorInicial) {
+      comp.aplicar(valorInicial, true);
+    }
+    terminarToque();
     descarregarFila(); // garante que o valor final chegue sem esperar o lote
+    dedosNoFader = Math.max(0, dedosNoFader - 1);
+    if (!dedosNoFader) {
+      for (const fazer of aoSoltarTodos.splice(0)) fazer();
+    }
   }
 
-  trilho.addEventListener('pointerup', soltar);
-  trilho.addEventListener('pointercancel', soltar);
+  trilho.addEventListener('pointerup', (ev) => soltar(ev, false));
+  trilho.addEventListener('pointercancel', (ev) => soltar(ev, true));
 
   trilho.addEventListener('keydown', (ev) => {
+    if (!comp.ativo) return;
     let novo = null;
     if (ev.key === 'ArrowUp') novo = comp.valor + PASSO_TECLADO;
     else if (ev.key === 'ArrowDown') novo = comp.valor - PASSO_TECLADO;
@@ -202,11 +490,65 @@ function criarFader(controle) {
     descarregarFila();
   });
 
-  botaoMudo.addEventListener('click', () => comp.definirMudo(!comp.mudo, true));
+  botaoMudo.addEventListener('click', () => {
+    if (!comp.ativo) {
+      if (opcoes.aoTocarInativo) opcoes.aoTocarInativo();
+      return;
+    }
+    comp.definirMudo(!comp.mudo, true);
+  });
 
+  comp.numerar(opcoes.numero || null);
+  comp.renomear(opcoes.rotulo, opcoes.rotuloAcessivel);
   comp.aplicar(0, false);
   return comp;
 }
+
+/** Algo que mexe no layout e nao pode acontecer com um dedo num fader. */
+function semDedoNoFader(fazer) {
+  if (!dedosNoFader) {
+    fazer();
+    return;
+  }
+  if (!aoSoltarTodos.includes(fazer)) aoSoltarTodos.push(fazer);
+}
+
+/** O eco do que a propria pessoa acabou de mexer nao pode puxar o fader de volta. */
+function ecoRecente(comp) {
+  return !!comp && (comp.arrastando || Date.now() - comp.mexidoEm < ECO_MS);
+}
+
+/** Fader de um controle calibrado (plano B). */
+function criarFaderDeControle(controle) {
+  const comp = criarFader({
+    tipo: controle.type || 'canal',
+    rotulo: controle.label,
+    numero: canalDaMesa(controle),
+    aoMudarValor: (valor) => enviarValor(controle.id, valor),
+    aoMudarMudo: (mudo) => enviar({ type: 'mute', control: controle.id, muted: mudo })
+  });
+  comp.controle = controle;
+  if (!controle.calibrated) comp.no.classList.add('faixa--cru');
+  return comp;
+}
+
+/* Girar o celular ou mudar a largura muda a largura do nome: mede de novo
+   so as faixas que aparecem (uma vez, quando a tela para de mudar). */
+let timerEncaixe = null;
+window.addEventListener('resize', () => {
+  clearTimeout(timerEncaixe);
+  timerEncaixe = setTimeout(() => {
+    for (const comp of [...faders.values(), ...fone.faixas.values()]) {
+      comp.encaixado = false;
+      if (!comp.no.hidden) comp.encaixar();
+    }
+    if (fone.mestre) {
+      fone.mestre.encaixado = false;
+      fone.mestre.encaixar();
+    }
+    if (!elEscolha.hidden) encaixarNomesDosFones();
+  }, 150);
+});
 
 /* ------------------------------ renderizacao ----------------------------- */
 
@@ -217,7 +559,7 @@ function desenharControles(lista) {
   elMestre.textContent = '';
 
   for (const controle of listaControles) {
-    const comp = criarFader(controle);
+    const comp = criarFaderDeControle(controle);
     faders.set(controle.id, comp);
     if (controle.type === 'master') elMestre.appendChild(comp.no);
     else elCanais.appendChild(comp.no);
@@ -226,11 +568,12 @@ function desenharControles(lista) {
   // Sem nenhum master definido, o painel lateral so ocuparia espaco a toa.
   elMestre.style.display = elMestre.childElementCount ? '' : 'none';
 
-  atualizarRodape();
-  atualizarVazio();
+  desenharPalco();
+  desenharSituacoes(); // "Usar os controles calibrados" depende de haver algum
   if (elAjustes.open) {
     desenharListaAjustes();
     desenharGerar();
+    desenharAvancado();
   }
   // A lista nova chega logo depois do learn:salvo, e e ela que diz se o canal
   // salvo ficou no formato do manual.
@@ -265,13 +608,18 @@ function enviar(objeto) {
 
 /**
  * Arrastar gera evento a cada quadro de tela. Em vez de mandar tudo, guardamos
- * o ultimo valor de cada fader e despachamos em lote. O ouvido nao percebe a
- * diferenca e a rede e o bridge ficam tranquilos.
+ * a ultima mensagem de cada fader (pela chave) e despachamos em lote. O ouvido
+ * nao percebe a diferenca e a rede e o bridge ficam tranquilos.
  */
-function enviarValor(id, valor) {
-  fila.set(id, valor);
+function enfileirar(chave, mensagem) {
+  fila.set(chave, mensagem);
   if (timerFila) return;
   timerFila = setTimeout(descarregarFila, INTERVALO_ENVIO);
+}
+
+/** Controle calibrado (plano B). */
+function enviarValor(id, valor) {
+  enfileirar('set:' + id, { type: 'set', control: id, value: valor });
 }
 
 function descarregarFila() {
@@ -279,10 +627,42 @@ function descarregarFila() {
     clearTimeout(timerFila);
     timerFila = null;
   }
-  for (const [id, valor] of fila) {
-    enviar({ type: 'set', control: id, value: valor });
-  }
+  for (const mensagem of fila.values()) enviar(mensagem);
   fila.clear();
+}
+
+/* Ultimo pedido feito daqui: um controle:erro que chega logo depois e a
+   resposta dele, e vai para o lugar certo em vez de um alerta solto. */
+let ultimoPedido = { tipo: '', em: 0 };
+const ERRO_DO_PEDIDO_MS = 5000;
+
+function marcarPedido(tipo) {
+  ultimoPedido = { tipo, em: Date.now() };
+}
+
+function receberErroDeControle(mensagem) {
+  // Com o teste da mesa pedido e ainda sem resposta, e o bridge dizendo
+  // que nao da para testar agora (relendo a cena, sem molde, ocupado).
+  if (mesa.fase === 'pedido') {
+    recusarTeste(mensagem);
+    return;
+  }
+  const recente = Date.now() - ultimoPedido.em < ERRO_DO_PEDIDO_MS;
+  if (recente && ultimoPedido.tipo === 'sincronizar') {
+    recusarSincronia(mensagem);
+    return;
+  }
+  if (recente && ultimoPedido.tipo === 'atualizar') {
+    recusarAtualizacao(mensagem);
+    return;
+  }
+  // No palco, um alerta no meio da musica trava a tela: o rodape conta.
+  if ((recente && ultimoPedido.tipo === 'fone') || (document.body.dataset.tela === 'fone' && !elAjustes.open)) {
+    avisarNoRodape(mensagem || 'A mesa não aceitou essa mudança.', AVISO_ERRO_FONE_MS);
+    return;
+  }
+  // Tambem chega aqui o erro de dar nome a uma cena.
+  alert(mensagem || 'Não consegui mudar esse controle.');
 }
 
 /* ------------------------------- WebSocket ------------------------------- */
@@ -296,7 +676,7 @@ function conectar() {
     return;
   }
 
-  definirConexao(tentativas === 0 ? 'ligando' : 'offline', tentativas === 0 ? 'ligando' : 'reconectando');
+  definirConexao(tentativas === 0 ? 'ligando' : 'offline');
 
   try {
     socket = new WebSocket(urlDoBridge());
@@ -308,10 +688,40 @@ function conectar() {
   socket.addEventListener('open', () => {
     tentativas = 0;
     conectado = true;
-    definirConexao('online', 'conectado');
-    atualizarRodape();
-    atualizarVazio();
-    atualizarBotaoAjustes();
+    conectadoEm = Date.now();
+    // Passada a carencia, a rota que veio no status ja diz se a mesa responde.
+    setTimeout(() => { if (conectado) desenharMapa(); }, CARENCIA_ROTA_MS + 50);
+    definirConexao('online');
+
+    // Quem pediu a atualizacao recarrega a pagina na volta: o programa novo
+    // pode ter tela nova. O service worker busca a rede primeiro.
+    if (atualizacao.reiniciando) {
+      atualizacao.reiniciando = false;
+      if (atualizacao.pedidaAqui) {
+        location.reload();
+        return;
+      }
+      atualizacao.fase = 'voltou';
+      desenharAtualizacao();
+    }
+
+    // Bridge que le a mesa manda mesa:resumo logo ao conectar. Sem ele ate
+    // aqui, e a versao que so conhece os controles calibrados.
+    if (!mapa.conhecido) {
+      clearTimeout(timerModo);
+      timerModo = setTimeout(() => {
+        if (mapa.conhecido || !conectado) return;
+        modo = 'legado';
+        desenharMapa();
+        desenharAtualizacao();
+      }, ESPERA_MODO);
+    }
+    // Depois de reconectar, o bridge precisa saber de novo qual e o fone.
+    if (fone.aux) pedirFone();
+
+    desenharPalco();
+    desenharLeitura();
+    desenharAtualizacao();
     manterTelaAcesa();
   });
 
@@ -337,6 +747,8 @@ function conectar() {
         // Bridge sem o teste da mesa nao manda 'rota': fica como estava.
         if ('rota' in msg) mesa.rota = rotaDoBridge(msg.rota);
         atualizarRodape();
+        desenharAvisos(); // mesa fora do cabo USB vira aviso no topo
+        desenharSituacoes();
         desenharEstadoDaMesa();
         desenharTesteDaMesa();
         desenharGerar();
@@ -353,14 +765,22 @@ function conectar() {
         receberDaGeracao(msg);
         break;
       case 'controle:erro':
-        // Com o teste da mesa pedido e ainda sem resposta, e o bridge dizendo
-        // que nao da para testar agora (relendo a cena, sem molde, ocupado).
-        if (mesa.fase === 'pedido') {
-          recusarTeste(msg.message);
-          break;
-        }
-        // Tambem chega aqui o erro de dar nome a uma cena.
-        alert(msg.message || 'Não consegui mudar esse controle.');
+        receberErroDeControle(textoLimpo(msg.message));
+        break;
+      case 'mesa:resumo':
+        receberResumo(msg);
+        break;
+      case 'mesa:sincronia':
+        receberSincronia(msg);
+        break;
+      case 'fone:estado':
+        receberEstadoDoFone(msg);
+        break;
+      case 'fone:mudou':
+        receberMudancaNoFone(msg);
+        break;
+      case 'atualizar:estado':
+        receberAtualizacao(msg);
         break;
       case 'cena':
         receberCena(msg);
@@ -378,7 +798,7 @@ function conectar() {
     // de verdade (estava conectado) mexe na folha de ajustes.
     const caiuAgora = conectado;
     conectado = false;
-    definirConexao('offline', 'reconectando');
+    definirConexao('offline');
     // Sem bridge a cena pode mudar sem a gente saber: o rotulo some ate o
     // bridge contar de novo, logo que reconectar.
     limparAviso();
@@ -389,10 +809,22 @@ function conectar() {
       clearTimeout(mesa.vigia);
       mesa.fase = null;
     }
+    // Pedido de leitura sem resposta: a queda responde por ele.
+    if (sincronizar.pedido) {
+      clearTimeout(sincronizar.vigia);
+      sincronizar.pedido = false;
+    }
+    // Atualizacao no meio (fora da troca): daqui nao da para saber como
+    // terminou. Se seguir, o bridge conta de novo.
+    if (FASES_ATUALIZANDO.has(atualizacao.fase) && !atualizacao.reiniciando) {
+      clearTimeout(atualizacao.vigia);
+      atualizacao.fase = null;
+    }
+    clearTimeout(fone.esperaTimer);
     desenharTesteDaMesa();
-    atualizarRodape();
-    atualizarVazio();
-    atualizarBotaoAjustes();
+    desenharPalco();
+    desenharLeitura();
+    desenharAtualizacao();
     if (gerar.ativo) {
       // Mesma ideia do assistente: a folha fica aberta para a pessoa ler o
       // aviso, em vez de sumir e deixar a duvida se criou ou nao. Fica segura
@@ -400,7 +832,8 @@ function conectar() {
       gerar.segurarFolha = true;
       terminarGerar('', 'A conexão com o bridge caiu no meio da conferência. ' +
         'O que a mesa já confirmou fica salvo; confira a lista quando reconectar.');
-    } else if (caiuAgora && elAjustes.open && !gerar.segurarFolha) {
+    } else if (caiuAgora && elAjustes.open && !gerar.segurarFolha && !atualizacao.reiniciando) {
+      // Na troca de versao a queda e esperada: a folha fica, contando que volta.
       elAjustes.close();
     } else {
       desenharGerar();
@@ -710,7 +1143,7 @@ function desenharGerar() {
     if (testando) elGerarUltimo.textContent = DICA_DURACAO_TESTE;
     else if (elGerarUltimo.textContent === DICA_DURACAO_TESTE) elGerarUltimo.textContent = '';
     // So reescreve quando muda: o leitor de tela anuncia cada troca.
-    if (elGerarProgressoTexto.textContent !== texto) elGerarProgressoTexto.textContent = texto;
+    if (elGerarProgressoTexto.textContent !== texto) escreverComNumeros(elGerarProgressoTexto, texto);
     elGerarBarra.style.width = (gerar.total ? Math.round((gerar.feitos / gerar.total) * 100) : 0) + '%';
     elGerarBarraTrilho.setAttribute('aria-valuemax', String(Math.max(1, gerar.total)));
     elGerarBarraTrilho.setAttribute('aria-valuenow', String(gerar.feitos));
@@ -1071,6 +1504,7 @@ function receberTesteDaMesa(msg) {
   if (fase === 'testando') vigiarTeste(ESPERA_MAX_TESTE);
 
   desenharTesteDaMesa();
+  desenharMapa(); // mesa sem resposta vira aviso no topo e trava os faders
   atualizarRodape();
 
   // No palco a folha de ajustes costuma estar fechada: o rodape conta.
@@ -1104,11 +1538,36 @@ function receberTesteDaMesa(msg) {
   desenharGerar();
 }
 
+/* O teste nao tem progresso (sao uns 20 s): um contador honesto,
+   "testando · 7 s", em vez de bolinha. */
+const elMesaTestandoTexto = document.getElementById('mesaTestandoTexto');
+let timerSegundosTeste = null;
+let testeComecouEm = 0;
+
+function contarSegundosDoTeste(testando) {
+  if (!testando) {
+    clearInterval(timerSegundosTeste);
+    timerSegundosTeste = null;
+    testeComecouEm = 0;
+    return;
+  }
+  if (!testeComecouEm) testeComecouEm = Date.now();
+  const escrever = () => escreverComNumeros(elMesaTestandoTexto,
+    'testando · ' + Math.floor((Date.now() - testeComecouEm) / 1000) + ' s');
+  escrever();
+  if (!timerSegundosTeste) timerSegundosTeste = setInterval(escrever, 1000);
+}
+
 function desenharTesteDaMesa() {
   const testando = testeEmAndamento();
-  const falhou = mesa.fase === 'falhou' || mesa.fase === 'parou';
+  // Quem conectou depois da falha nao recebeu o mesa:teste: a rota que veio no
+  // status (nula ou nao reconfirmada) ja diz que a mesa nao responde.
+  const inferido = !testando && mesa.fase === null && estadoDaMesa() === 'sem-rota';
+  const falhou = mesa.fase === 'falhou' || mesa.fase === 'parou' || inferido;
+  const conferir = mesa.conferir.length ? mesa.conferir : (falhou ? CONFERIR_NA_MESA : []);
 
   elMesaTestando.hidden = !testando;
+  contarSegundosDoTeste(testando);
   if (testando) {
     elMesaTestados.textContent = (mesa.testados
       ? mesa.testados + (mesa.testados === 1 ? ' caminho testado. ' : ' caminhos testados. ')
@@ -1128,17 +1587,19 @@ function desenharTesteDaMesa() {
       ? 'Se o celular não mexer no som, confira na mesa:'
       : 'Confira na mesa:';
     elMesaMotivo.textContent = mesa.motivo ||
-      (mesa.testados
-        ? 'A mesa não respondeu em nenhum dos ' + mesa.testados + ' caminhos testados.'
-        : 'A mesa não respondeu ao teste.');
+      (inferido
+        ? 'A mesa não respondeu ao último teste do caminho até ela.'
+        : mesa.testados
+          ? 'A mesa não respondeu em nenhum dos ' + mesa.testados + ' caminhos testados.'
+          : 'A mesa não respondeu ao teste.');
     elMesaConferir.textContent = '';
-    for (const texto of mesa.conferir) {
+    for (const texto of conferir) {
       const item = document.createElement('li');
       item.appendChild(destacarMenus(texto));
       elMesaConferir.appendChild(item);
     }
-    elMesaConferirTitulo.hidden = !mesa.conferir.length;
-    elMesaConferir.hidden = !mesa.conferir.length;
+    elMesaConferirTitulo.hidden = !conferir.length;
+    elMesaConferir.hidden = !conferir.length;
   }
 
   elBtnTestarMesa.disabled = testando || !conectado;
@@ -1217,27 +1678,40 @@ elDevolverMix.addEventListener('change', () => {
 
 const elBtnAjustes = document.getElementById('btnAjustes');
 
-elBtnAjustes.addEventListener('click', () => {
-  // Sem bridge nao ha nada para ajustar: a lista, a mesa e a calibracao todas
-  // dependem dele. Abrir a tela so mostraria campos vazios.
+/* A engrenagem do comando e as da escolha (retrato e paisagem). Sem bridge
+   nao ha nada para ajustar: a lista, a mesa e a calibracao dependem dele, e
+   o que ajuda e conferir o endereco do programa. */
+function tocarEmAjustes() {
   if (!conectado) {
-    elPainelEndereco.value = localStorage.getItem(CHAVE_BRIDGE) || '';
-    elPainelInfo.textContent =
-      'Ainda não achei o bridge.\nEndereço em uso: ' + urlDoBridge();
-    elPainel.showModal();
+    abrirPainelConexao();
     return;
   }
   abrirAjustes();
-});
+}
+
+elBtnAjustes.addEventListener('click', tocarEmAjustes);
+document.getElementById('escolhaAjustes').addEventListener('click', tocarEmAjustes);
+document.getElementById('escolhaAjustesRotulo').addEventListener('click', tocarEmAjustes);
 
 function abrirAjustes() {
   desenharListaAjustes();
   desenharEstadoDaMesa();
   desenharTesteDaMesa();
+  desenharLeitura();
+  desenharAtualizacao();
   desenharGerar();
   desenharCenas();
+  desenharAvancado();
   enviar({ type: 'midi:portas' });
   if (!elAjustes.open) elAjustes.showModal();
+}
+
+/** A partir da tela do fone: abre os ajustes ja no Testar a mesa. */
+function abrirAjustesNaMesa() {
+  if (!conectado) return;
+  abrirAjustes();
+  document.getElementById('blocoMesa').scrollIntoView({ block: 'start' });
+  if (!elBtnTestarMesa.disabled) elBtnTestarMesa.focus({ preventScroll: true });
 }
 
 /**
@@ -1247,6 +1721,7 @@ function abrirAjustes() {
 function puxarTodosDeFora() {
   if (!conectado) return;
   abrirAjustes();
+  elAvancado.open = true; // o bloco de criar canais mora no Avançado
   if (gerar.ativo) {
     elBlocoGerar.scrollIntoView({ block: 'start' });
     return;
@@ -1262,16 +1737,18 @@ function puxarTodosDeFora() {
    o numero (0 a 99); o nome e dado aqui e vale para todos os celulares.    */
 
 const NOME_CENA_MAX = 30;
-const AVISO_TROCA_MS = 6000;
+const AVISO_TROCA_MS = 4000;
+const CENA_INVERTIDA_MS = 600; // a linha da cena fica invertida e volta em 400 ms (CSS)
+const CENA_INVERTIDA_CALMA_MS = 1000; // com menos movimento: 1 s invertida, sem fade
 const AVISO_RELIDA_MS = 5000;
 
-const elTopo = document.querySelector('.topo');
 const elCena = document.getElementById('cena');
 const elCenaNumero = document.getElementById('cenaNumero');
 const elCenaPonto = document.getElementById('cenaPonto');
 const elCenaNome = document.getElementById('cenaNome');
 const elRodapeBarra = elRodape.parentElement;
 const elRodapeAviso = document.getElementById('rodapeAviso');
+const elPassageiro = document.getElementById('passageiro');
 const elCenasExplica = document.getElementById('cenasExplica');
 const elListaCenas = document.getElementById('listaCenas');
 
@@ -1292,10 +1769,10 @@ function nomeDaCena(numero) {
   return cena.nomes.get(numero) || '';
 }
 
-/** "Cena 3 · Pedro" ou "Cena 3". */
+/** "Cena 03 · Pedro" ou "Cena 03", como no visor da mesa. */
 function rotuloDaCena(numero) {
   const nome = nomeDaCena(numero);
-  return 'Cena ' + numero + (nome ? ' · ' + nome : '');
+  return 'Cena ' + doisDigitos(numero) + (nome ? ' · ' + nome : '');
 }
 
 function receberCena(msg) {
@@ -1371,58 +1848,42 @@ function contar(valor) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/** Linha da cena no comando. Sem conexao a cena e desconhecida: some. */
 function desenharCena() {
   const atual = conectado ? cena.atual : null;
   elCena.hidden = !atual;
-  if (!atual) {
-    delete elTopo.dataset.cena;
-    return;
-  }
+  if (!atual) return;
 
   const nome = nomeDaCena(atual.numero);
-  elCenaNumero.textContent = String(atual.numero);
+  elCenaNumero.textContent = doisDigitos(atual.numero);
   elCenaNome.textContent = nome;
   elCenaNome.hidden = !nome;
   elCenaPonto.hidden = !nome;
-  encaixarCena();
 }
 
-/**
- * O topo nao pode quebrar em 360px. Tenta a forma inteira; sem espaco, tira o
- * "01V96" da marca; ainda sem espaco, "Cena 3" vira "C3". O nome so corta com
- * reticencias se nem assim couber.
- */
-function encaixarCena() {
-  if (elCena.hidden) return;
-  for (const forma of ['longa', 'compacta', 'curta']) {
-    elTopo.dataset.cena = forma;
-    if (!cenaTransborda()) return;
-  }
-}
+let timerCena = null;
 
-function cenaTransborda() {
-  return elCena.scrollWidth > elCena.clientWidth + 1 ||
-    (!elCenaNome.hidden && elCenaNome.scrollWidth > elCenaNome.clientWidth + 1);
-}
-
-window.addEventListener('resize', encaixarCena);
-
+/* Troca de cena: a linha vira uma etiqueta invertida por 600 ms e volta em
+   400 ms, uma vez so. Nada pisca depois disso. */
 function avisarTrocaDeCena() {
-  // Tirar e por a classe de novo reinicia o pulso a cada troca.
-  elCena.classList.remove('cena--trocou');
-  void elCena.offsetWidth;
-  elCena.classList.add('cena--trocou');
-  avisarNoRodape('a mesa trocou para a ' + rotuloDaCena(cena.atual.numero), AVISO_TROCA_MS);
+  const calmo = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  clearTimeout(timerCena);
+  elCena.classList.add('cena--invertida');
+  timerCena = setTimeout(() => elCena.classList.remove('cena--invertida'),
+    calmo ? CENA_INVERTIDA_CALMA_MS : CENA_INVERTIDA_MS);
+  avisarNoRodape(rotuloDaCena(cena.atual.numero) + ' carregada na mesa', AVISO_TROCA_MS);
 }
-
-elCena.addEventListener('animationend', () => elCena.classList.remove('cena--trocou'));
 
 let timerAviso = null;
 
+/* Aviso passageiro: no rodape em retrato; no trilho, abaixo da cena, quando o
+   rodape nao aparece (paisagem e retrato baixo). */
 function avisarNoRodape(texto, ms) {
   clearTimeout(timerAviso);
   elRodapeAviso.textContent = texto;
   elRodapeBarra.dataset.aviso = '1';
+  elPassageiro.textContent = texto;
+  elPassageiro.hidden = false;
   timerAviso = setTimeout(limparAviso, ms);
 }
 
@@ -1431,6 +1892,8 @@ function limparAviso() {
   timerAviso = null;
   elRodapeAviso.textContent = '';
   delete elRodapeBarra.dataset.aviso;
+  elPassageiro.textContent = '';
+  elPassageiro.hidden = true;
 }
 
 /* Bloco "Cenas da mesa" nos ajustes. */
@@ -1616,6 +2079,52 @@ function linhasControlesNoDiagnostico(lista) {
     ' | faixa ' + c.rawMin + ' a ' + c.rawMax);
 }
 
+/**
+ * Linhas da leitura da mesa, a partir de /api/status.mapa:
+ *   mapa: pronta, resolução alta (crua 1023)
+ *   mapa lidos: 1100 de 1100, sem resposta: 2 (...)
+ *   mapa sincronizada: às 19:02
+ *   nomes dos Aux: 1 Bateria | 2 Baixo | 3 (sem nome) | ...
+ * Os nomes vem do mapa quando ele traz; senao, do ultimo mesa:resumo.
+ */
+function linhasMapaNoDiagnostico(dado) {
+  const linhas = [];
+  if (dado === undefined || dado === null || typeof dado !== 'object') {
+    linhas.push('mapa: ' + (dado === undefined ? 'o programa não informa (versão sem leitura da mesa)' : 'nenhum'));
+  } else {
+    const crua = dado.resolucaoCrua === undefined || dado.resolucaoCrua === null ? ''
+      : ' (crua ' + (typeof dado.resolucaoCrua === 'object' ? JSON.stringify(dado.resolucaoCrua) : String(dado.resolucaoCrua)) + ')';
+    linhas.push('mapa: ' + (dado.pronta ? 'pronta' : 'não pronta') +
+      ', resolução ' + (dado.resolucao || 'desconhecida') + crua);
+    linhas.push('mapa lidos: ' + descreverContagem(dado.lidos) + ' de ' + descreverContagem(dado.total) +
+      ', sem resposta: ' + descreverSemResposta(dado.semResposta));
+    const quando = quandoNoDiagnostico(dado.sincronizadaEm);
+    linhas.push('mapa sincronizada: ' + (quando || 'ainda não'));
+  }
+
+  const doMapa = dado && Array.isArray(dado.auxes) ? dado.auxes : null;
+  const auxes = doMapa || (mapa.conhecido ? mapa.auxes : []);
+  linhas.push('nomes dos Aux: ' + (auxes.length
+    ? auxes.map((a) => (a && a.aux) + ' ' + (textoLimpo(a && a.nome) || '(sem nome)')).join(' | ')
+    : 'nenhum recebido'));
+  return linhas;
+}
+
+function descreverContagem(valor) {
+  const n = Number(valor);
+  return Number.isFinite(n) ? String(n) : '?';
+}
+
+/** Quantidade, ou a lista (as 8 primeiras). */
+function descreverSemResposta(valor) {
+  if (Array.isArray(valor)) {
+    if (!valor.length) return '0';
+    const itens = valor.slice(0, 8).map((v) => (typeof v === 'object' ? JSON.stringify(v) : String(v)));
+    return valor.length + ' (' + itens.join(', ') + (valor.length > 8 ? ', ...' : '') + ')';
+  }
+  return descreverContagem(valor);
+}
+
 /** "F0 43 30 ..." venha com ou sem espacos. Fora disso, devolve como veio. */
 function formatarHex(hex) {
   if (typeof hex !== 'string') return hexDoBruto(hex);
@@ -1655,6 +2164,9 @@ elBtnDiagnostico.addEventListener('click', async () => {
       'rota: ' + descreverRotaNoDiagnostico(dados.rota),
       'portas MIDI vistas: ' + ((dados.midi.portasVistas || []).join(' | ') || 'nenhuma'),
       'cena: ' + descreverCenaNoDiagnostico(dados.cena),
+      ...linhasMapaNoDiagnostico(dados.mapa),
+      'fone deste celular: ' + (fone.aux ? rotuloDoAux(fone.aux) : 'nenhum escolhido') +
+        (planoB ? ' (usando os controles calibrados)' : ''),
       'controles: ' + dados.controles + ', sem calibrar: ' + (dados.naoCalibrados.join(', ') || 'nenhum'),
       'celulares conectados: ' + dados.clientes,
       'versão: ' + ((dados.versao && dados.versao.sha) || 'desconhecida') +
@@ -1699,11 +2211,6 @@ elBtnDiagnostico.addEventListener('click', async () => {
     elBtnDiagnostico.disabled = false;
   }, 2200);
 });
-
-/** O botao de ajustes fica apagado enquanto nao ha bridge. */
-function atualizarBotaoAjustes() {
-  elBtnAjustes.classList.toggle('icone-botao--apagado', !conectado);
-}
 
 document.getElementById('btnFecharAjustes').addEventListener('click', () => elAjustes.close());
 
@@ -1947,22 +2454,1095 @@ function receberDoAssistente(msg) {
   }
 }
 
+/* ---------------------------- o fone da pessoa ---------------------------
+   O bridge le a mesa sozinho (nomes, sends e on de todos os Aux) e manda um
+   resumo para todos. Cada celular escolhe o seu Aux e recebe so os canais
+   dele; o que a pessoa mexe vai direto para o send desse Aux na mesa.
+   A escolha fica no celular e vai de novo para o bridge a cada conexao.   */
+
+const TOTAL_AUX = 8;
+const ESPERA_MODO = 2500;        // sem mesa:resumo ate aqui: bridge que nao le a mesa
+const ESPERA_ESTADO = 8000;      // mesa pronta, fone pedido, e nada dos canais
+const ESPERA_SINCRONIA = 10000;  // pediu a leitura e o bridge nem comecou
+const ESPERA_ATUALIZAR = 15000;  // pediu a atualizacao e o bridge nao respondeu
+const AVISO_ERRO_FONE_MS = 8000;
+const AVISO_INATIVO_MS = 6000;
+const AVISO_LEITURA_MS = 8000;
+const AVISO_TROCANDO_MS = 60000; // o texto promete "ate 1 minuto"
+const CARENCIA_ROTA_MS = 1500;   // ao conectar, espera o "testando" antes de culpar a rota
+
+/* O que conferir quando a mesa nao responde. O bridge manda esta lista no
+   resultado do teste; quem conectou depois da falha nao recebe, e usa esta,
+   igual a do bridge (CONFERIR_NA_MESA em src/bridge.js). */
+const CONFERIR_NA_MESA = [
+  'MIDI | SETUP: PARAMETER CHANGE com Rx ON.',
+  'MIDI | SETUP, linha CHANNEL: anote os canais Tx e Rx (o app testa o Rx sozinho, de 1 a 16).',
+  'DIO/SETUP | MIDI/HOST: GENERAL Rx PORT e Tx PORT em USB (a mesma USB do cabo).',
+  'Feche o "AirFader" (ou o "Studio Manager") neste PC: aberto, ele pode prender a porta da mesa.'
+];
+
+let conectadoEm = 0; // quando a conexao com o bridge abriu (carencia da rota)
+
+const elFone = document.getElementById('fone');
+const elFoneTrocar = document.getElementById('foneTrocar');
+const elFoneAux = document.getElementById('foneAux');
+const elFoneApelido = document.getElementById('foneApelido');
+const elFoneFiltro = document.getElementById('foneFiltro');
+const elAbaComSomN = document.getElementById('abaComSomN');
+const elAbaTodosN = document.getElementById('abaTodosN');
+const elFoneCanais = document.getElementById('foneCanais');
+const elFoneNenhum = document.getElementById('foneNenhum');
+const elFoneVerTodos = document.getElementById('foneVerTodos');
+const elFoneMestre = document.getElementById('foneMestre');
+const elFoneEspera = document.getElementById('foneEspera');
+const elEscolha = document.getElementById('escolha');
+const elEscolhaTitulo = document.getElementById('escolhaTitulo');
+const elEscolhaGrade = document.getElementById('escolhaGrade');
+const elEscolhaVoltar = document.getElementById('escolhaVoltar');
+const elLegadoVoltar = document.getElementById('legadoVoltar');
+const moldeSituacao = document.getElementById('moldeSituacao');
+
+/** 'desconhecido' logo ao conectar; 'mapa' quando o bridge le a mesa; 'legado' quando nao. */
+let modo = 'desconhecido';
+let timerModo = null;
+
+const mapa = {
+  conhecido: false,     // ja chegou algum mesa:resumo
+  pronta: false,
+  auxes: [],            // [{ aux, nome }] de 1 a 8
+  resolucao: null,
+  sincronizadaEm: null,
+  fase: null,           // ultima mesa:sincronia: 'lendo' | 'pronta' | 'falhou'
+  lidos: 0,
+  total: 0,
+  motivo: ''
+};
+
+/** 1..8, venha como numero ou texto ("3"); senao null. */
+function numeroDeAux(valor) {
+  const n = typeof valor === 'string' && /^\d{1,2}$/.test(valor.trim()) ? Number(valor) : valor;
+  return Number.isInteger(n) && n >= 1 && n <= TOTAL_AUX ? n : null;
+}
+
+const fone = {
+  aux: numeroDeAux(lerSalvo(CHAVE_FONE)),
+  estado: null,         // { aux, nome, master: { valor, on } | null, canais: Map canal -> canal }
+  filtro: 'com-som',    // 'com-som' | 'todos'
+  visiveis: new Set(),  // canais que aparecem em "Só com som"
+  faixas: new Map(),    // canal -> fader
+  mestre: null,         // fader do volume geral do fone
+  escolhendo: false,    // tocou em trocar: a primeira tela volta, com o fone atual marcado
+  esperaTimer: null,
+  semResposta: false    // mesa pronta, fone pedido, e o bridge nao mandou os canais
+};
+
+/** Plano B: os controles calibrados no palco. Fica salvo ate a pessoa voltar. */
+let planoB = lerSalvo(CHAVE_PLANO_B) === '1';
+
+function usandoMapa() {
+  return modo === 'mapa' && !(planoB && listaControles.length > 0);
+}
+
+function prontaParaUsar() {
+  return mapa.pronta || mapa.fase === 'pronta';
+}
+
+function nomeDoAux(aux) {
+  if (fone.estado && fone.estado.aux === aux && fone.estado.nome) return fone.estado.nome;
+  const item = mapa.auxes.find((a) => a.aux === aux);
+  return item ? item.nome : '';
+}
+
+/** "AUX 3 · Bateria", ou so "AUX 3" quando a mesa nao tem nome para ele. */
+function rotuloDoAux(aux) {
+  const nome = nomeDoAux(aux);
+  return 'AUX ' + aux + (nome ? ' · ' + nome : '');
+}
+
+/** O nome que esta na mesa, ou "CH 5". */
+function rotuloDoCanal(canal) {
+  return canal.nome || 'CH ' + canal.canal;
+}
+
+/** "O que esta na cena": confirmado, ligado e com algum volume. */
+function temSom(canal) {
+  return canal.confirmado && canal.on !== false && canal.valor > 0;
+}
+
+function canaisSemResposta() {
+  if (!fone.estado) return 0;
+  let n = 0;
+  for (const c of fone.estado.canais.values()) if (!c.confirmado) n++;
+  return n;
+}
+
+/** "lendo a mesa: 230 de 1100" */
+function textoDaLeitura() {
+  return 'lendo a mesa' + (mapa.total ? ': ' + Math.min(mapa.lidos, mapa.total) + ' de ' + mapa.total : '');
+}
+
+function porcentoDaLeitura() {
+  return mapa.total ? Math.round((Math.min(mapa.lidos, mapa.total) / mapa.total) * 100) : 0;
+}
+
+/** Tudo que depende da leitura da mesa e da escolha do fone. */
+function desenharMapa() {
+  desenharPalco();
+  desenharSituacoes();
+  desenharLeitura();
+  if (elAjustes.open) desenharAvancado();
+}
+
+/* ---- o que chega do bridge -------------------------------------------- */
+
+function receberResumo(msg) {
+  const eraPronta = prontaParaUsar();
+  mapa.conhecido = true;
+  clearTimeout(timerModo);
+  modo = 'mapa';
+  mapa.pronta = msg.pronta === true;
+  // A mesa saiu do cabo (ou o bridge perdeu a leitura) sem leitura em curso:
+  // vem resumo com pronta false e nenhuma mesa:sincronia. O 'pronta' da ultima
+  // leitura nao vale mais: o aviso de mesa fora aparece e os faders travam.
+  if (!mapa.pronta && mapa.fase === 'pronta') mapa.fase = null;
+
+  const nomes = new Map();
+  if (Array.isArray(msg.auxes)) {
+    for (const item of msg.auxes) {
+      const aux = numeroDeAux(item && item.aux);
+      if (aux) nomes.set(aux, nomeDoAuxDaMesa(item.nome, aux));
+    }
+  }
+  mapa.auxes = [];
+  for (let aux = 1; aux <= TOTAL_AUX; aux++) mapa.auxes.push({ aux, nome: nomes.get(aux) || '' });
+
+  mapa.resolucao = msg.resolucao === 'baixa' || msg.resolucao === 'alta' ? msg.resolucao : null;
+  mapa.sincronizadaEm = typeof msg.sincronizadaEm === 'string' && msg.sincronizadaEm ? msg.sincronizadaEm : null;
+
+  // A mesa ficou pronta com o fone ja pedido: daqui em diante vale esperar os canais.
+  if (!eraPronta && prontaParaUsar() && fone.aux && !fone.estado) vigiarEstado();
+  desenharMapa();
+  desenharAtualizacao();
+}
+
+function receberSincronia(msg) {
+  const fase = msg.fase;
+  if (fase !== 'lendo' && fase !== 'pronta' && fase !== 'falhou') return;
+  const antes = mapa.fase;
+  const eraPronta = prontaParaUsar();
+
+  mapa.fase = fase;
+  mapa.lidos = inteiroOuZero(msg.lidos);
+  mapa.total = inteiroOuZero(msg.total);
+  mapa.motivo = fase === 'falhou' ? textoLimpo(msg.motivo) : '';
+
+  // Qualquer noticia da leitura responde ao pedido feito daqui.
+  if (sincronizar.pedido) {
+    clearTimeout(sincronizar.vigia);
+    sincronizar.pedido = false;
+    sincronizar.acompanhando = true;
+  }
+  sincronizar.erro = '';
+
+  // A falha tem o aviso ambar no topo; a leitura pedida daqui conta que acabou.
+  if (antes !== null && antes !== fase && fase === 'pronta' && sincronizar.acompanhando) {
+    avisarNoRodape('a mesa foi lida de novo', AVISO_LEITURA_MS);
+  }
+  if (fase !== 'lendo') sincronizar.acompanhando = false;
+
+  if (!eraPronta && prontaParaUsar() && fone.aux && !fone.estado) vigiarEstado();
+  desenharMapa();
+}
+
+/**
+ * Sem nome lido na mesa, o bridge manda "Aux 3" / "Canal 5". Aqui isso conta
+ * como sem nome: a tecla mostra "sem nome na mesa" e a faixa "CH 05", em vez
+ * de repetir o numero duas vezes.
+ */
+function nomeDaMesa(texto, padrao, numero) {
+  const nome = textoLimpo(texto);
+  return new RegExp('^(?:' + padrao + ')\\s*0*' + numero + '$', 'i').test(nome) ? '' : nome;
+}
+
+function nomeDoAuxDaMesa(texto, aux) {
+  return nomeDaMesa(texto, 'aux', aux);
+}
+
+function nomeDoCanalDaMesa(texto, canal) {
+  return nomeDaMesa(texto, 'canal|ch', canal);
+}
+
+function lerCanalDoBridge(bruto) {
+  const canal = bruto && Number.isInteger(bruto.canal) && bruto.canal >= 1 && bruto.canal <= TOTAL_CANAIS
+    ? bruto.canal : null;
+  if (!canal) return null;
+  return {
+    canal,
+    nome: nomeDoCanalDaMesa(bruto.nome, canal),
+    valor: valor01(bruto.valor),
+    on: bruto.on === false ? false : bruto.on === true ? true : null,
+    confirmado: bruto.confirmado !== false
+  };
+}
+
+/**
+ * O fone inteiro: chega depois de escolher e depois de cada leitura da mesa
+ * (troca de cena, por exemplo). O filtro "Só com som" refaz a lista aqui.
+ */
+function receberEstadoDoFone(msg) {
+  const aux = numeroDeAux(msg.aux);
+  if (!aux || aux !== fone.aux) return; // resposta atrasada de um fone anterior
+
+  const canais = [];
+  if (Array.isArray(msg.canais)) {
+    for (const bruto of msg.canais) {
+      const c = lerCanalDoBridge(bruto);
+      if (c) canais.push(c);
+    }
+  }
+  canais.sort((a, b) => a.canal - b.canal);
+
+  const m = msg.master && typeof msg.master === 'object' ? msg.master : null;
+  fone.estado = {
+    aux,
+    nome: nomeDoAuxDaMesa(msg.nome, aux),
+    // Valor nulo = a mesa nao respondeu esse endereco: fica "?", nunca 0.
+    master: m && m.valor !== null && m.valor !== undefined ? { valor: valor01(m.valor), on: m.on !== false } : null,
+    canais: new Map(canais.map((c) => [c.canal, c]))
+  };
+  const item = mapa.auxes.find((a) => a.aux === aux);
+  if (item && fone.estado.nome) item.nome = fone.estado.nome;
+
+  clearTimeout(fone.esperaTimer);
+  fone.semResposta = false;
+  recalcularVisiveis();
+  desenharFaixas();
+  desenharMapa();
+}
+
+/** Uma mudanca so: de outro celular no mesmo Aux, da mesa, ou o nome. */
+function receberMudancaNoFone(msg) {
+  const aux = numeroDeAux(msg.aux);
+  if (!aux) return;
+  const campo = msg.campo;
+  const semCanal = msg.canal === null || msg.canal === undefined;
+
+  // Nome do proprio Aux (a equipe renomeou na mesa).
+  if (campo === 'nome' && semCanal) {
+    const nome = nomeDoAuxDaMesa(msg.valor, aux);
+    const item = mapa.auxes.find((a) => a.aux === aux);
+    if (item) item.nome = nome;
+    if (fone.estado && fone.estado.aux === aux) fone.estado.nome = nome;
+    desenharMapa();
+    return;
+  }
+
+  const est = fone.estado;
+  if (!est || est.aux !== aux) return;
+
+  if (campo === 'master' || campo === 'masterOn') {
+    if (!est.master) est.master = { valor: 0, on: true };
+    if (campo === 'master') {
+      if (ecoRecente(fone.mestre)) return;
+      est.master.valor = valor01(msg.valor);
+    } else {
+      est.master.on = msg.valor !== false;
+    }
+    desenharMestreDoFone();
+    return;
+  }
+
+  const numero = Number(msg.canal);
+  const c = est.canais.get(numero);
+  if (!c) return;
+  if (campo === 'valor') {
+    if (ecoRecente(fone.faixas.get(numero))) return;
+    c.valor = valor01(msg.valor);
+  } else if (campo === 'on') {
+    c.on = msg.valor !== false;
+  } else if (campo === 'nome') {
+    c.nome = nomeDoCanalDaMesa(msg.valor, numero);
+  } else {
+    return;
+  }
+  atualizarFaixa(c);
+
+  // Canal que ganhou som entra no filtro. O que perdeu fica ate a proxima
+  // cena: nao some debaixo do dedo de ninguem.
+  if (temSom(c) && !fone.visiveis.has(numero)) {
+    fone.visiveis.add(numero);
+    aplicarFiltro();
+  }
+  atualizarRodape();
+}
+
+/* ---- escolher o fone ----------------------------------------------------- */
+
+/** Pediu o fone com a mesa pronta: se os canais nao vierem, a tela diz. */
+function vigiarEstado() {
+  clearTimeout(fone.esperaTimer);
+  fone.semResposta = false;
+  if (!conectado || !fone.aux || fone.estado || !prontaParaUsar()) return;
+  fone.esperaTimer = setTimeout(() => {
+    if (fone.estado || !prontaParaUsar()) return;
+    fone.semResposta = true;
+    desenharMapa();
+  }, ESPERA_ESTADO);
+}
+
+function pedirFone() {
+  if (!fone.aux || !conectado) return;
+  enviar({ type: 'fone:escolher', aux: fone.aux });
+  vigiarEstado();
+  desenharSituacoes();
+}
+
+function escolherFone(aux) {
+  fone.escolhendo = false;
+  if (aux !== fone.aux || !fone.estado) {
+    descarregarFila(); // o que estava na fila ainda e do fone anterior
+    fone.aux = aux;
+    salvar(CHAVE_FONE, aux);
+    fone.estado = null;
+    fone.filtro = 'com-som';
+    fone.visiveis = new Set();
+    pedirFone();
+  }
+  desenharMapa();
+}
+
+/** Um numero dado, na fonte de mostrador. */
+function spanNumero(texto) {
+  const n = document.createElement('span');
+  n.className = 'n';
+  n.textContent = String(texto);
+  return n;
+}
+
+function desenharEscolha() {
+  if (elEscolhaGrade.childElementCount !== TOTAL_AUX) {
+    elEscolhaGrade.textContent = '';
+    for (let aux = 1; aux <= TOTAL_AUX; aux++) {
+      const botao = document.createElement('button');
+      botao.type = 'button';
+      botao.className = 'aux';
+      botao.dataset.aux = String(aux);
+      elEscolhaGrade.appendChild(botao);
+    }
+  }
+
+  // Tecla: legenda "AUX" + numero em cima, nome da mesa embaixo. Sem nome na
+  // mesa, a legenda diz isso e o "AUX 8" vira o nome, num tom abaixo.
+  for (const botao of elEscolhaGrade.children) {
+    const aux = Number(botao.dataset.aux);
+    const nome = nomeDoAux(aux);
+    const atual = aux === fone.aux;
+
+    const legenda = document.createElement('span');
+    legenda.className = 'aux__num';
+    const elNome = document.createElement('span');
+    elNome.className = 'aux__nome';
+    if (nome) {
+      legenda.append('AUX ', spanNumero(aux));
+      elNome.textContent = nome;
+    } else {
+      legenda.textContent = 'sem nome na mesa';
+      elNome.append('AUX ', spanNumero(aux));
+    }
+
+    botao.textContent = '';
+    botao.classList.toggle('aux--sem', !nome);
+    botao.append(legenda);
+    if (atual) {
+      const marca = document.createElement('span');
+      marca.className = 'aux__atual';
+      marca.textContent = 'atual';
+      botao.append(marca);
+      botao.setAttribute('aria-current', 'true');
+    } else {
+      botao.removeAttribute('aria-current');
+    }
+    botao.append(elNome);
+    botao.setAttribute('aria-label', rotuloDoAux(aux) + (atual ? ', o seu fone agora' : ''));
+  }
+  encaixarNomesDosFones();
+
+  // "Continuar no AUX 3 · Bateria": so quando ja existe um fone.
+  const continuar = !!(fone.aux && fone.escolhendo);
+  elEscolhaVoltar.hidden = !continuar;
+  if (continuar) {
+    const nome = nomeDoAux(fone.aux);
+    elEscolhaVoltar.textContent = '';
+    elEscolhaVoltar.append('Continuar no AUX ', spanNumero(fone.aux));
+    if (nome) {
+      const resto = document.createElement('span');
+      resto.className = 'continuar__nome';
+      resto.textContent = ' · ' + nome;
+      elEscolhaVoltar.append(resto);
+    }
+    elEscolhaVoltar.setAttribute('aria-label', 'Continuar no ' + rotuloDoAux(fone.aux));
+  }
+}
+
+/* Tecla estreita na paisagem: o nome do fone diminui antes de quebrar a palavra. */
+const NOME_DO_FONE_MENOR = 17;
+
+function encaixarNomesDosFones() {
+  for (const el of elEscolhaGrade.querySelectorAll('.aux__nome')) encaixarNome(el, NOME_DO_FONE_MENOR);
+}
+
+elEscolhaGrade.addEventListener('click', (ev) => {
+  const botao = ev.target.closest('[data-aux]');
+  if (botao) escolherFone(Number(botao.dataset.aux));
+});
+
+elEscolhaVoltar.addEventListener('click', () => {
+  fone.escolhendo = false;
+  desenharMapa();
+});
+
+elFoneTrocar.addEventListener('click', () => {
+  fone.escolhendo = true;
+  desenharMapa();
+});
+
+/* ---- a tela do fone ------------------------------------------------------ */
+
+function desenharTelaDoFone() {
+  const apelido = nomeDoAux(fone.aux);
+  elFoneAux.textContent = String(fone.aux);
+  elFoneApelido.textContent = apelido || 'AUX ' + fone.aux;
+  elFoneTrocar.setAttribute('aria-label', 'Seu fone: ' + rotuloDoAux(fone.aux) + '. Trocar de fone');
+
+  const temCanais = foneComCanais();
+  elFoneEspera.hidden = temCanais;
+  elFoneCanais.hidden = !temCanais;
+  elFoneMestre.hidden = !temCanais;
+  if (fone.mestre) fone.mestre.definirPe('AUX', fone.aux);
+
+  // Faixas desenhadas com a tela escondida: o nome so mede agora.
+  if (temCanais) {
+    for (const comp of fone.faixas.values()) if (!comp.no.hidden) comp.encaixar();
+    if (fone.mestre) fone.mestre.encaixar();
+  }
+}
+
+function criarFaixa(numero) {
+  const modelo = () => (fone.estado ? fone.estado.canais.get(numero) : null);
+  return criarFader({
+    tipo: 'canal',
+    rotulo: 'CH ' + numero,
+    numero,
+    aoMudarValor: (valor) => {
+      const c = modelo();
+      if (c) c.valor = valor;
+      if (!fone.aux) return;
+      marcarPedido('fone');
+      enfileirar('fone:send:' + fone.aux + ':' + numero,
+        { type: 'fone:send', aux: fone.aux, canal: numero, valor: arredondar01(valor) });
+    },
+    aoMudarMudo: (mudo) => {
+      const c = modelo();
+      if (c) c.on = !mudo;
+      if (!fone.aux) return;
+      marcarPedido('fone');
+      enviar({ type: 'fone:sendOn', aux: fone.aux, canal: numero, on: !mudo });
+    },
+    aoTocarInativo: () => {
+      const c = modelo();
+      // Curto para caber no rodape em 360px; o caminho (Ler a mesa de novo) esta em Ajustes.
+      avisarNoRodape('canal ' + numero + (c && c.nome ? ' (' + c.nome + ')' : '') +
+        ' sem resposta da mesa: veja Ajustes', AVISO_INATIVO_MS);
+    }
+  });
+}
+
+/**
+ * Valor, nome, mudo e confirmacao de um canal. Valor que chega de fora (troca
+ * de cena, outro celular) desliza como fader motorizado; o primeiro desenho
+ * nao.
+ */
+function atualizarFaixa(c) {
+  const comp = fone.faixas.get(c.canal);
+  if (!comp) return;
+  comp.renomear(rotuloDoCanal(c),
+    'Canal ' + c.canal + (c.nome ? ', ' + c.nome : '') + (c.confirmado ? '' : ', a mesa não confirmou'),
+    { semNome: !c.nome, numero: c.canal });
+  comp.definirAtivo(c.confirmado, 'A mesa não confirmou este canal.');
+  if (!comp.arrastando) comp.aplicar(c.valor, false, comp.iniciado);
+  comp.iniciado = true;
+  comp.definirMudo(c.on === false, false);
+}
+
+function criarMestreDoFone() {
+  return criarFader({
+    tipo: 'master',
+    rotulo: 'Volume geral',
+    rotuloAcessivel: 'Volume geral do fone',
+    aoMudarValor: (valor) => {
+      if (!fone.aux) return;
+      if (fone.estado && fone.estado.master) fone.estado.master.valor = valor;
+      marcarPedido('fone');
+      enfileirar('fone:master:' + fone.aux, { type: 'fone:master', aux: fone.aux, valor: arredondar01(valor) });
+    },
+    aoMudarMudo: (mudo) => {
+      if (!fone.aux) return;
+      if (fone.estado && fone.estado.master) fone.estado.master.on = !mudo;
+      marcarPedido('fone');
+      enviar({ type: 'fone:masterOn', aux: fone.aux, on: !mudo });
+    },
+    aoTocarInativo: () => {
+      avisarNoRodape('volume geral sem resposta da mesa: veja Ajustes', AVISO_INATIVO_MS);
+    }
+  });
+}
+
+function desenharMestreDoFone() {
+  if (!fone.mestre) {
+    fone.mestre = criarMestreDoFone();
+    elFoneMestre.appendChild(fone.mestre.no);
+  }
+  const m = fone.estado ? fone.estado.master : null;
+  fone.mestre.definirAtivo(!!m, 'A mesa não confirmou o volume geral deste fone.');
+  if (m && !fone.mestre.arrastando) fone.mestre.aplicar(m.valor, false, fone.mestre.iniciado);
+  fone.mestre.iniciado = !!m;
+  fone.mestre.definirMudo(m ? !m.on : false, false);
+  if (fone.aux) fone.mestre.definirPe('AUX', fone.aux);
+  fone.mestre.encaixar();
+}
+
+/**
+ * As faixas nascem uma vez (32) e so mudam de valor, nome e visibilidade:
+ * a troca de cena atualiza no lugar e nao derruba o dedo de quem arrasta.
+ */
+function desenharFaixas() {
+  const est = fone.estado;
+  if (!est) return;
+  const lista = [...est.canais.values()];
+  const mesmas = lista.length === fone.faixas.size && lista.every((c) => fone.faixas.has(c.canal));
+  if (!mesmas) {
+    for (const comp of fone.faixas.values()) comp.no.remove();
+    fone.faixas.clear();
+    for (const c of lista) {
+      const comp = criarFaixa(c.canal);
+      fone.faixas.set(c.canal, comp);
+      elFoneCanais.insertBefore(comp.no, elFoneNenhum);
+    }
+  }
+  for (const c of lista) atualizarFaixa(c);
+  desenharMestreDoFone();
+  aplicarFiltro();
+}
+
+function recalcularVisiveis() {
+  fone.visiveis = new Set();
+  if (!fone.estado) return;
+  for (const c of fone.estado.canais.values()) if (temSom(c)) fone.visiveis.add(c.canal);
+}
+
+function aplicarFiltro() {
+  const todos = fone.filtro === 'todos';
+  let aparecem = 0;
+  for (const [canal, comp] of fone.faixas) {
+    const ver = todos || fone.visiveis.has(canal) || comp.arrastando;
+    comp.no.hidden = !ver;
+    if (ver) {
+      aparecem++;
+      comp.encaixar();
+    }
+  }
+  const total = fone.faixas.size || TOTAL_CANAIS;
+  elFoneNenhum.hidden = aparecem > 0 || !fone.faixas.size;
+  escreverComNumeros(elFoneVerTodos, 'Mostrar todos ' + total);
+  elAbaComSomN.textContent = String(fone.visiveis.size);
+  elAbaTodosN.textContent = String(total);
+  for (const botao of elFoneFiltro.querySelectorAll('[data-filtro]')) {
+    botao.setAttribute('aria-pressed', botao.dataset.filtro === fone.filtro ? 'true' : 'false');
+  }
+}
+
+function trocarFiltro(filtro) {
+  if (filtro !== 'com-som' && filtro !== 'todos') return;
+  fone.filtro = filtro;
+  if (filtro === 'com-som') recalcularVisiveis();
+  aplicarFiltro();
+  elFoneCanais.scrollLeft = 0;
+}
+
+elFoneFiltro.addEventListener('click', (ev) => {
+  const botao = ev.target.closest('[data-filtro]');
+  if (botao) trocarFiltro(botao.dataset.filtro);
+});
+
+elFoneVerTodos.addEventListener('click', () => trocarFiltro('todos'));
+
+/* ---- mesa no topo: so aparece quando ha algo ---------------------------
+   pronta = nada; lendo = "lendo a mesa 330/1100" na linha das abas, sem
+   empurrar as faixas; falhou, mesa fora do cabo e sem conexao = aviso ambar.
+   O aviso empurra as faixas em retrato: so entra (ou sai) sem dedo num
+   fader. A escolha nao tem faders: la ele entra na hora.                */
+
+const elAviso = document.getElementById('aviso');
+const elLendo = document.getElementById('lendo');
+
+const avisoComando = {
+  caixa: elAviso,
+  titulo: document.getElementById('avisoTitulo'),
+  longo: document.getElementById('avisoLongo'),
+  curto: document.getElementById('avisoCurto'),
+  acao: document.getElementById('avisoAcao'),
+  calibrados: null
+};
+
+const avisoEscolha = {
+  caixa: document.getElementById('avisoEscolha'),
+  titulo: document.getElementById('avisoEscolhaTitulo'),
+  longo: document.getElementById('avisoEscolhaLongo'),
+  curto: document.getElementById('avisoEscolhaCurto'),
+  acao: document.getElementById('avisoEscolhaAcao'),
+  calibrados: document.getElementById('avisoEscolhaCalibrados')
+};
+
+const lendoComando = {
+  caixa: elLendo,
+  texto: document.getElementById('lendoTexto'),
+  fio: document.getElementById('lendoFio')
+};
+
+const lendoEscolha = {
+  caixa: document.getElementById('lendoEscolha'),
+  texto: document.getElementById('lendoEscolhaTexto'),
+  fio: document.getElementById('lendoEscolhaFio')
+};
+
+let alertaNoComando = null; // o alerta que esta na tela agora (ou null)
+
+/**
+ * O teste do caminho ate a mesa falhou: aqui (mesa:teste "falhou") ou antes de
+ * este celular conectar (a rota veio nula ou nao reconfirmada no status). Logo
+ * ao conectar espera um instante: um "testando" pode estar vindo em seguida.
+ */
+function semRotaAteAMesa() {
+  if (mesa.fase === 'falhou' || mesa.fase === 'parou') return true;
+  if (testeEmAndamento()) return false;
+  if (Date.now() - conectadoEm < CARENCIA_ROTA_MS) return false;
+  return !mesa.rota || mesa.rota.reconfirmada === false;
+}
+
+/**
+ * 'sem' | 'falhou' | 'desligada' | 'sem-rota' | 'testando' | 'lendo' |
+ * 'esperando' | null (pronta).
+ */
+function estadoDaMesa() {
+  if (document.body.dataset.conexao === 'offline') return 'sem';
+  if (!conectado || modo !== 'mapa') return null;
+  if (mapa.fase === 'falhou') return 'falhou';
+  if (mapa.fase === 'lendo') return 'lendo';
+  if (prontaParaUsar()) return null;
+  if (statusMidi && statusMidi.simulado) return 'desligada';
+  if (testeEmAndamento()) return 'testando';
+  if (semRotaAteAMesa()) return 'sem-rota';
+  return 'esperando';
+}
+
+function alertaDaMesa() {
+  const tipo = estadoDaMesa();
+  return tipo === 'sem' || tipo === 'falhou' || tipo === 'desligada' || tipo === 'sem-rota' ? tipo : null;
+}
+
+function desenharAvisos() {
+  const tipo = estadoDaMesa();
+  // Mesa fora (ou ainda nao lida) com o fone na tela: os faders ficam apagados
+  // e travados, como sem conexao. Nada que se mexa aqui chegaria na mesa.
+  if (['desligada', 'esperando', 'sem-rota', 'testando'].includes(tipo)) document.body.dataset.mesa = 'fora';
+  else delete document.body.dataset.mesa;
+  desenharLendo(lendoComando, tipo);
+  desenharLendo(lendoEscolha, tipo);
+  preencherAlerta(avisoEscolha, alertaDaMesa(), true);
+
+  if (alertaDaMesa() === alertaNoComando) preencherAlerta(avisoComando, alertaNoComando, false);
+  else semDedoNoFader(trocarAlertaDoComando);
+
+  desenharCena(); // sem conexao a cena e desconhecida
+}
+
+function trocarAlertaDoComando() {
+  alertaNoComando = alertaDaMesa();
+  preencherAlerta(avisoComando, alertaNoComando, false);
+}
+
+function desenharLendo(r, tipo) {
+  const mostra = tipo === 'lendo' || tipo === 'esperando' || tipo === 'testando';
+  r.caixa.hidden = !mostra;
+  if (!mostra) return;
+  if (tipo === 'lendo') {
+    escreverComNumeros(r.texto, mapa.total
+      ? 'lendo a mesa ' + Math.min(mapa.lidos, mapa.total) + '/' + mapa.total
+      : 'lendo a mesa');
+    r.caixa.removeAttribute('data-sem-fio');
+    r.fio.style.width = porcentoDaLeitura() + '%';
+  } else {
+    r.texto.textContent = tipo === 'testando' ? 'testando o caminho até a mesa' : 'esperando a mesa';
+    r.caixa.setAttribute('data-sem-fio', '');
+  }
+}
+
+function preencherAlerta(r, tipo, naEscolha) {
+  r.caixa.hidden = !tipo;
+  if (!tipo) return;
+
+  const comCanais = !!fone.estado && !naEscolha;
+  const temCalibrados = listaControles.some((c) => c.calibrated);
+  let titulo;
+  let longo;
+  let curto;
+  let acao = true;
+  if (tipo === 'sem') {
+    titulo = 'Sem conexão';
+    longo = 'O celular não acha o programa da mesa. Confira se está no Wi-Fi da igreja. ' +
+      (naEscolha ? 'Os fones aparecem quando a conexão voltar.' : 'Os faders voltam sozinhos quando a conexão voltar.');
+    curto = naEscolha ? 'Confira o Wi-Fi da igreja.' : 'Confira o Wi-Fi da igreja. Os faders voltam sozinhos.';
+    acao = false;
+  } else if (tipo === 'falhou') {
+    titulo = 'Mesa falhou';
+    longo = (mapa.motivo || 'A mesa não respondeu à leitura.') +
+      (comCanais ? ' Os canais que ela não confirmou ficam apagados até a próxima leitura.' : '');
+    curto = comCanais ? 'Canais não confirmados ficam apagados.' : 'A mesa não respondeu à leitura.';
+  } else if (tipo === 'sem-rota') {
+    // O cenario real da igreja (Rx CH, porta): o texto ja diz o que olhar.
+    titulo = 'Mesa sem resposta';
+    longo = 'A mesa não respondeu ao teste: nada do celular chega nela. Na mesa, confira ' +
+      // Espaco que nao quebra dentro do nome do menu: "MIDI | SETUP" desce inteiro.
+      'PARAMETER CHANGE com Rx ON (MIDI | SETUP) e GENERAL Rx PORT em USB (DIO/SETUP | MIDI/HOST).';
+    curto = 'Confira na mesa o Rx ON e o Rx PORT em USB.';
+  } else {
+    titulo = 'Mesa não encontrada';
+    longo = 'O programa não acha a mesa no cabo USB. Quando ela ligar, ele lê os nomes sozinho.';
+    curto = 'A mesa não está no cabo USB.';
+  }
+  r.titulo.textContent = titulo;
+  r.longo.textContent = '';
+  r.longo.append(destacarMenus(longo));
+  r.curto.textContent = curto;
+  r.acao.hidden = !acao;
+  if (r.calibrados) r.calibrados.hidden = !(tipo === 'falhou' && temCalibrados);
+}
+
+avisoComando.acao.addEventListener('click', () => abrirAjustesNaMesa());
+avisoEscolha.acao.addEventListener('click', () => abrirAjustesNaMesa());
+avisoEscolha.calibrados.addEventListener('click', () => usarCalibrados(true));
+
+/* ---- o fone ainda sem canais ------------------------------------------- */
+
+function montarSituacao(casa) {
+  const no = moldeSituacao.content.firstElementChild.cloneNode(true);
+  casa.appendChild(no);
+  const s = {
+    casa,
+    texto: no.querySelector('[data-texto]'),
+    erro: no.querySelector('[data-erro]'),
+    titulo: no.querySelector('[data-titulo]'),
+    motivo: no.querySelector('[data-motivo]'),
+    calibrados: no.querySelector('[data-acao="calibrados"]')
+  };
+  no.addEventListener('click', (ev) => {
+    const botao = ev.target.closest('[data-acao]');
+    if (!botao) return;
+    if (botao.dataset.acao === 'ajustes') abrirAjustesNaMesa();
+    else if (botao.dataset.acao === 'calibrados') usarCalibrados(true);
+    else if (botao.dataset.acao === 'tentar') pedirFone();
+  });
+  return s;
+}
+
+const situacaoFone = montarSituacao(document.getElementById('foneSituacao'));
+
+/**
+ * Algum canal que a mesa confirmou? Com a mesa sem resposta o fone chega com
+ * os 32 sem valor: ai nao ha faixa para mostrar, e muito menos "Nenhum canal
+ * com som", que culparia a cena.
+ */
+function foneComCanais() {
+  if (!fone.estado) return false;
+  for (const c of fone.estado.canais.values()) if (c.confirmado) return true;
+  return false;
+}
+
+/** O que dizer no lugar das faixas enquanto os canais nao chegam. */
+function situacaoDoFone() {
+  if (foneComCanais()) return null;
+  if (document.body.dataset.conexao === 'offline') return 'sem-conexao';
+  if (!conectado || modo !== 'mapa') return null;
+  const tipo = estadoDaMesa();
+  if (tipo === 'lendo') return 'lendo';
+  if (tipo === 'falhou') return 'falhou';
+  if (tipo === 'sem-rota') return 'sem-rota';
+  if (tipo === 'testando') return 'testando';
+  if (tipo) return 'esperando';
+  return fone.estado || fone.semResposta ? 'sem-resposta' : 'abrindo';
+}
+
+function desenharSituacoes() {
+  const s = situacaoFone;
+  const tipo = situacaoDoFone();
+  s.casa.hidden = !tipo;
+  if (!tipo) return;
+
+  const erro = tipo === 'sem-resposta';
+  s.erro.hidden = !erro;
+  s.texto.hidden = erro;
+  s.calibrados.hidden = !(tipo === 'falhou' && listaControles.some((c) => c.calibrated));
+
+  if (tipo === 'sem-conexao') s.texto.textContent = 'Os faders aparecem quando a conexão voltar.';
+  else if (tipo === 'lendo') s.texto.textContent = 'Os canais do seu fone chegam quando a leitura terminar.';
+  else if (tipo === 'esperando') s.texto.textContent = 'Os canais do seu fone aparecem quando a mesa responder.';
+  else if (tipo === 'sem-rota') s.texto.textContent = 'A mesa não respondeu: os canais do seu fone aparecem quando ela responder. Veja o aviso acima.';
+  else if (tipo === 'testando') s.texto.textContent = 'Testando o caminho até a mesa. Os canais aparecem quando ela responder.';
+  else if (tipo === 'falhou') s.texto.textContent = 'Sem a leitura da mesa, os canais do seu fone não aparecem.';
+  else if (tipo === 'abrindo') s.texto.textContent = 'abrindo o ' + rotuloDoAux(fone.aux);
+  else {
+    s.titulo.textContent = 'Sem os canais do fone';
+    s.motivo.textContent = 'O programa não mandou os canais do ' + rotuloDoAux(fone.aux) +
+      '. Toque em Tentar de novo; se continuar, copie o diagnóstico em Ajustes.';
+  }
+}
+
+/* ---- plano B: os controles calibrados no palco ------------------------- */
+
+const elAvancado = document.getElementById('avancado');
+const elUsarCalibrados = document.getElementById('usarCalibrados');
+
+function usarCalibrados(ligar) {
+  planoB = !!ligar;
+  salvar(CHAVE_PLANO_B, planoB ? '1' : '');
+  desenharMapa();
+  desenharAvancado();
+}
+
+elLegadoVoltar.addEventListener('click', () => usarCalibrados(false));
+elUsarCalibrados.addEventListener('change', () => usarCalibrados(elUsarCalibrados.checked));
+
+function desenharAvancado() {
+  // Bridge que nao le a mesa: a calibracao e o unico caminho, fica aberta.
+  const legado = modo === 'legado';
+  elUsarCalibrados.closest('label').hidden = legado;
+  elUsarCalibrados.checked = planoB;
+  elUsarCalibrados.disabled = !planoB && !listaControles.length;
+  if (legado) elAvancado.open = true;
+}
+
+/* ---- ler a mesa de novo -------------------------------------------------- */
+
+const elBlocoLeitura = document.getElementById('blocoLeitura');
+const elLeituraEstado = document.getElementById('leituraEstado');
+const elLeituraProgresso = document.getElementById('leituraProgresso');
+const elLeituraProgressoTexto = document.getElementById('leituraProgressoTexto');
+const elLeituraBarra = document.getElementById('leituraBarra');
+const elLeituraBarraTrilho = document.getElementById('leituraBarraTrilho');
+const elLeituraErro = document.getElementById('leituraErro');
+const elLeituraMotivo = document.getElementById('leituraMotivo');
+const elLeituraDica = document.getElementById('leituraDica');
+const elBtnLerMesa = document.getElementById('btnLerMesa');
+
+const sincronizar = {
+  pedido: false,       // pediu daqui e o bridge ainda nao deu noticia
+  acompanhando: false, // a leitura em andamento foi pedida daqui
+  vigia: null,
+  erro: ''             // recusa ou silencio do bridge
+};
+
+elBtnLerMesa.addEventListener('click', () => {
+  if (!conectado || mapa.fase === 'lendo' || sincronizar.pedido) return;
+  sincronizar.pedido = true;
+  sincronizar.erro = '';
+  clearTimeout(sincronizar.vigia);
+  sincronizar.vigia = setTimeout(() => {
+    if (!sincronizar.pedido) return;
+    sincronizar.pedido = false;
+    sincronizar.erro = 'O programa não respondeu ao pedido de leitura. Ele pode estar desatualizado: ' +
+      'copie o diagnóstico abaixo e peça ajuda.';
+    desenharLeitura();
+  }, ESPERA_SINCRONIA);
+  marcarPedido('sincronizar');
+  enviar({ type: 'mesa:sincronizar' });
+  desenharLeitura();
+});
+
+function recusarSincronia(texto) {
+  clearTimeout(sincronizar.vigia);
+  sincronizar.pedido = false;
+  sincronizar.acompanhando = false;
+  sincronizar.erro = texto || 'O programa não pôde ler a mesa agora. Tente de novo daqui a pouco.';
+  desenharLeitura();
+}
+
+function desenharLeitura() {
+  elBlocoLeitura.hidden = modo === 'legado';
+  const lendo = mapa.fase === 'lendo';
+  const falhou = mapa.fase === 'falhou' && !sincronizar.pedido;
+
+  elLeituraProgresso.hidden = !lendo;
+  if (lendo) {
+    if (elLeituraProgressoTexto.textContent !== textoDaLeitura()) escreverComNumeros(elLeituraProgressoTexto, textoDaLeitura());
+    elLeituraBarra.style.width = porcentoDaLeitura() + '%';
+    elLeituraBarraTrilho.setAttribute('aria-valuemax', String(Math.max(1, mapa.total)));
+    elLeituraBarraTrilho.setAttribute('aria-valuenow', String(Math.min(mapa.lidos, Math.max(1, mapa.total))));
+  }
+
+  let estado;
+  if (sincronizar.pedido) estado = 'pedindo a leitura';
+  else if (falhou) estado = 'não consegui ler a mesa';
+  else if (prontaParaUsar()) {
+    const quando = quandoNoDiagnostico(mapa.sincronizadaEm);
+    estado = 'Mesa lida' + (quando ? ' ' + quando : '');
+  } else if (!mapa.conhecido) estado = 'esperando o programa contar';
+  else estado = statusMidi && statusMidi.simulado ? 'esperando a mesa ligar no cabo USB' : 'ainda não lida';
+  elLeituraEstado.textContent = estado;
+  elLeituraEstado.hidden = lendo; // o medidor ja conta
+  elLeituraEstado.classList.toggle('bloco__estado--alerta', falhou || (!prontaParaUsar() && !sincronizar.pedido));
+
+  const erro = sincronizar.erro || (falhou ? (mapa.motivo || 'A mesa não respondeu à leitura.') : '');
+  elLeituraErro.hidden = !erro;
+  elLeituraMotivo.textContent = erro;
+  // Recusa do programa (ja lendo, ocupado) nao e problema de caminho ate a mesa.
+  elLeituraDica.hidden = !!sincronizar.erro;
+
+  elBtnLerMesa.disabled = !conectado || lendo || sincronizar.pedido;
+  elBtnLerMesa.textContent = sincronizar.pedido ? 'Pedindo a leitura' : lendo ? 'Lendo a mesa' : 'Ler a mesa de novo';
+}
+
+/* ---- atualizar o programa agora ------------------------------------------ */
+
+const elBlocoAtualizar = document.getElementById('blocoAtualizar');
+const elAtualizarEstado = document.getElementById('atualizarEstado');
+const elAtualizarProgresso = document.getElementById('atualizarProgresso');
+const elAtualizarProgressoTexto = document.getElementById('atualizarProgressoTexto');
+const elAtualizarDetalhe = document.getElementById('atualizarDetalhe');
+const elAtualizarErro = document.getElementById('atualizarErro');
+const elBtnAtualizar = document.getElementById('btnAtualizar');
+
+const FASES_ATUALIZANDO = new Set(['pedido', 'verificando', 'baixando', 'testando', 'trocando']);
+const TEXTO_DA_FASE = {
+  pedido: 'pedindo a atualização',
+  verificando: 'procurando versão nova',
+  baixando: 'baixando a versão nova',
+  testando: 'testando a versão nova',
+  trocando: 'trocando de versão'
+};
+
+const atualizacao = {
+  fase: null,          // as do bridge, mais 'pedido' (daqui) e 'voltou' (reconectou depois de trocar)
+  mensagem: '',
+  erro: '',            // recusa ou silencio do bridge
+  pedidaAqui: false,   // este celular pediu: recarrega a pagina quando o programa voltar
+  reiniciando: false,  // 'trocando': a queda da conexao e esperada
+  vigia: null
+};
+
+elBtnAtualizar.addEventListener('click', () => {
+  if (!conectado || FASES_ATUALIZANDO.has(atualizacao.fase)) return;
+  if (!confirm('O app vai reiniciar e pode levar até 1 minuto. O som da mesa não muda. ' +
+    'Com a mesa ligada, um ajuste feito nos últimos segundos pode não ficar salvo.')) return;
+
+  atualizacao.fase = 'pedido';
+  atualizacao.mensagem = '';
+  atualizacao.erro = '';
+  atualizacao.pedidaAqui = true;
+  clearTimeout(atualizacao.vigia);
+  atualizacao.vigia = setTimeout(() => {
+    if (atualizacao.fase !== 'pedido') return;
+    atualizacao.fase = null;
+    atualizacao.pedidaAqui = false;
+    atualizacao.erro = 'O programa não respondeu ao pedido de atualização. Ele pode ser de uma versão ' +
+      'sem este botão: copie o diagnóstico abaixo e peça ajuda.';
+    desenharAtualizacao();
+  }, ESPERA_ATUALIZAR);
+  marcarPedido('atualizar');
+  enviar({ type: 'atualizar:agora' });
+  desenharAtualizacao();
+});
+
+function recusarAtualizacao(texto) {
+  clearTimeout(atualizacao.vigia);
+  atualizacao.fase = null;
+  atualizacao.pedidaAqui = false;
+  atualizacao.erro = texto || 'O programa não pôde se atualizar agora. Tente de novo daqui a pouco.';
+  desenharAtualizacao();
+}
+
+/** Mensagem 'atualizar:estado' do bridge. */
+function receberAtualizacao(msg) {
+  const fase = msg.fase;
+  if (!FASES_ATUALIZANDO.has(fase) && fase !== 'em-dia' && fase !== 'falhou') return;
+  clearTimeout(atualizacao.vigia);
+  atualizacao.fase = fase;
+  atualizacao.mensagem = textoLimpo(msg.mensagem);
+  atualizacao.erro = '';
+  atualizacao.reiniciando = fase === 'trocando';
+
+  if (fase === 'trocando') {
+    avisarNoRodape('o programa está reiniciando: volta em até 1 minuto', AVISO_TROCANDO_MS);
+  } else if (fase === 'em-dia' || fase === 'falhou') {
+    // "falhou" tambem chega quando o atualizador nao da sinal de vida em 2 min,
+    // depois de "trocando": o aviso de reinicio no rodape deixa de valer.
+    if (elRodapeAviso.textContent.startsWith('o programa está reiniciando')) limparAviso();
+    if (atualizacao.pedidaAqui && !elAjustes.open) {
+      avisarNoRodape(fase === 'em-dia'
+        ? 'o programa já está na versão mais nova'
+        : 'a atualização não terminou: veja Ajustes', AVISO_LEITURA_MS);
+    }
+    atualizacao.pedidaAqui = false;
+  }
+  desenharAtualizacao();
+}
+
+function desenharAtualizacao() {
+  elBlocoAtualizar.hidden = modo === 'legado';
+  const fase = atualizacao.fase;
+  const ativa = FASES_ATUALIZANDO.has(fase);
+
+  elAtualizarProgresso.hidden = !ativa;
+  if (ativa) {
+    elAtualizarProgressoTexto.textContent = TEXTO_DA_FASE[fase];
+    elAtualizarDetalhe.textContent = atualizacao.mensagem ||
+      (fase === 'trocando' ? 'O app volta sozinho em até 1 minuto. O som da mesa não muda.' : '');
+    elAtualizarDetalhe.hidden = !elAtualizarDetalhe.textContent;
+  }
+
+  let estado = '';
+  if (fase === 'em-dia') estado = atualizacao.mensagem || 'Já está na versão mais nova.';
+  else if (fase === 'voltou') estado = 'O programa reiniciou e já voltou.';
+  elAtualizarEstado.textContent = estado;
+  elAtualizarEstado.hidden = !estado;
+
+  const erro = atualizacao.erro ||
+    (fase === 'falhou' ? 'A atualização não terminou.' + (atualizacao.mensagem ? ' ' + atualizacao.mensagem : '') : '');
+  elAtualizarErro.textContent = erro;
+  elAtualizarErro.hidden = !erro;
+
+  elBtnAtualizar.disabled = !conectado || ativa;
+  elBtnAtualizar.textContent = ativa ? 'Atualizando' : 'Atualizar agora';
+}
+
 /* ------------------------- painel de conexao ----------------------------- */
 
-elConexao.addEventListener('click', () => {
-  const salvo = localStorage.getItem(CHAVE_BRIDGE) || '';
-  elPainelEndereco.value = salvo;
-  elPainelInfo.textContent =
-    'Situação: ' + elConexaoTexto.textContent + '\nEndereço em uso: ' + urlDoBridge();
+function abrirPainelConexao() {
+  elPainelEndereco.value = lerSalvo(CHAVE_BRIDGE);
+  elPainelInfo.textContent = (conectado ? 'Conectado.' : 'Ainda não achei o programa.') +
+    '\nEndereço em uso: ' + urlDoBridge();
   elPainel.showModal();
+}
+
+document.getElementById('btnEndereco').addEventListener('click', () => {
+  elAjustes.close();
+  abrirPainelConexao();
 });
 
 elPainel.addEventListener('close', () => {
   if (elPainel.returnValue !== 'salvar') return;
 
   const valor = elPainelEndereco.value.trim();
-  if (valor) localStorage.setItem(CHAVE_BRIDGE, valor);
-  else localStorage.removeItem(CHAVE_BRIDGE);
+  salvar(CHAVE_BRIDGE, valor);
 
   // Reconecta ja com o endereco novo, do zero.
   tentativas = 0;
@@ -2006,6 +3586,5 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-atualizarVazio();
-atualizarBotaoAjustes();
+desenharPalco();
 conectar();

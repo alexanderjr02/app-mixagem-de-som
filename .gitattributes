@@ -2,3 +2,4 @@
 # evita surpresa nos arquivos de servico do systemd depois do clone.
 * text=auto eol=lf
 *.png binary
+*.woff2 binary

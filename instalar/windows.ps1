@@ -168,7 +168,7 @@ if ($tarefaPausada) {
     $destinoMin = $DESTINO.ToLower()
     Listar-Node | Where-Object {
       $l = $_.Linha.ToLower().Replace('"', ' ')
-      $l.Contains($destinoMin) -and ($l -match 'atualizar\s*$')
+      $l.Contains($destinoMin) -and ($l -match 'atualizar(\s+--agora(\s+\S+)?)?\s*$')
     } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
     Start-Sleep -Seconds 1
     Remove-Item -LiteralPath $trava -Force -ErrorAction SilentlyContinue
@@ -287,8 +287,8 @@ $donosPorta = @()
 try { $donosPorta = @(Get-NetTCPConnection -LocalPort $PORTA -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $_.OwningProcess }) } catch { }
 Listar-Node | Where-Object {
   $l = $_.Linha.ToLower().Replace('"', ' ')
-  $doDestino = $l.Contains($destinoMin) -and ($l -notmatch 'atualizar\s*$') -and ($l -match '(iniciar|bridge)\.js')
-  $daPorta = ($donosPorta -contains $_.Id) -and ($l -match '(iniciar|bridge)\.js') -and ($l -notmatch 'atualizar\s*$')
+  $doDestino = $l.Contains($destinoMin) -and ($l -notmatch 'atualizar(\s+--agora(\s+\S+)?)?\s*$') -and ($l -match '(iniciar|bridge)\.js')
+  $daPorta = ($donosPorta -contains $_.Id) -and ($l -match '(iniciar|bridge)\.js') -and ($l -notmatch 'atualizar(\s+--agora(\s+\S+)?)?\s*$')
   $doDestino -or $daPorta
 } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Seconds 1
